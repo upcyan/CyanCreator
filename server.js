@@ -1,4 +1,6 @@
 import http from 'node:http';
+import {spawn} from 'node:child_process';
+import {inspectUpdate} from './lib/updates.js';
 import {readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, createReadStream, createWriteStream, statSync} from 'node:fs';
 import {unlink, mkdir} from 'node:fs/promises';
 import path from 'node:path';
@@ -33,6 +35,10 @@ for (const asset of state.assets) {
 }
 const token = randomBytes(32).toString('hex');
 const controllers = new Map();
+let updateBusy=false,checkedUpdate;
+const updateFile=path.join(DATA,'update-status.json');
+function updateStatus(){try{return JSON.parse(readFileSync(updateFile,'utf8'));}catch{return {phase:'idle'};}}
+if(updateStatus().phase==='restarting')writeFileSync(updateFile,JSON.stringify({...updateStatus(),phase:'succeeded'}));
 function persist() {writeFileSync(dbPath + '.tmp', JSON.stringify(state, null, 2)); renameSync(dbPath + '.tmp', dbPath);}
 const deployments = new Deployments(state, DATA, persist);
 function shutdown(){for(const controller of controllers.values())controller.abort();deployments.close();process.exit(0);}
@@ -140,7 +146,24 @@ export const server = http.createServer(async (req, res) => {
     if (!['GET', 'HEAD'].includes(method)) {
       requireValue(req.headers['x-workspace-token'] === token, '请求认证失败，请刷新工作台', 403);
       requireValue(!req.headers.origin || req.headers.origin === `http://${host}`, '跨站请求被拒绝', 403);
+      requireValue(!updateBusy,'平台正在更新，暂时不能修改数据',503);
     }
+    if(u.pathname==='/api/updates/status'&&method==='GET')return json(res,updateStatus());
+    if(u.pathname==='/api/updates/check'&&method==='POST'){checkedUpdate=await inspectUpdate(ROOT);if(updateStatus().phase==='failed'){checkedUpdate.available=true;checkedUpdate.commits+='\n上次更新失败，可重新应用以修复依赖。';}return json(res,checkedUpdate);}
+    if(u.pathname==='/api/updates/apply'&&method==='POST'){
+      const request=await body(req);requireValue(checkedUpdate?.available&&request.target===checkedUpdate.target,'请先检查更新');
+      requireValue(![...state.jobs,...state.deployments].some(j=>['queued','running'].includes(j.status)),'请等待生成、下载和导出任务结束');
+      requireValue(!updateBusy,'已有更新正在应用',409);updateBusy=true;
+      try{
+        const fresh=await inspectUpdate(ROOT,false);requireValue(fresh.current===checkedUpdate.current&&fresh.target===request.target,'仓库已变化，请重新检查');
+        const worker=path.join(DATA,'update-worker.mjs');writeFileSync(worker,readFileSync(path.join(ROOT,'lib','update-worker.js')));
+        writeFileSync(updateFile,JSON.stringify({phase:'starting',target:fresh.target}));
+        const child=spawn(process.execPath,[worker,ROOT,DATA,fresh.target,String(process.pid)],{cwd:ROOT,detached:true,windowsHide:true,stdio:'ignore',env:{...process.env,PORT:String(server.address().port)}});
+        await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',reject);});child.unref();
+        json(res,{ok:true});setTimeout(shutdown,300);return;
+      }catch(error){updateBusy=false;throw error;}
+    }
+    if(u.pathname==='/updates.js'&&['GET','HEAD'].includes(method)){res.setHeader('Cache-Control','no-store');return serveFile(req,res,path.join(ROOT,'public','updates.js'),'text/javascript; charset=utf-8');}
     if (u.pathname === '/api/state' && method === 'GET') return json(res, {...publicState(), token});
     if (u.pathname === '/api/h3-preset' && method === 'GET') return json(res, h3Preset());
     const preset = u.pathname.match(/^\/api\/video-presets\/([\w-]+)$/);
