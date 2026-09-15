@@ -141,9 +141,15 @@ export const server = http.createServer(async (req, res) => {
     if (details && method === 'GET') {const j = state.jobs.find(j => j.id === details[1]); requireValue(j, '任务不存在', 404); const {snapshot, ...safe} = j; return json(res, safe);}
     if (u.pathname === '/api/settings' && method === 'PUT') {state.settings = validateSettings(await body(req)); persist(); return json(res, {ok: true});}
     if (u.pathname === '/api/probe' && method === 'POST') {
-      const {kind, role, profileId} = await body(req); requireValue(['text', 'comfy'].includes(kind), '只支持文本或 ComfyUI 探测');
+      const {kind, role, profileId, start} = await body(req); requireValue(['text', 'comfy'].includes(kind), '只支持文本或 ComfyUI 探测');
       const config = kind === 'comfy' ? state.settings.video : profileId ? state.settings.text.profiles.find(p => p.id === profileId) : resolveTextConfig(state.settings.text, role || 'outline');
-      requireValue(config, '模型配置不存在'); return json(res, await probe(config, kind));
+      requireValue(config, '模型配置不存在');
+      if(kind==='comfy'&&start){
+        requireValue(config.baseUrl.replace(/\/$/,'')===state.deploymentConfig.comfyUrl.replace(/\/$/,''), '自动启动地址须与部署设置中的 ComfyUI 本机地址一致');
+        requireValue(!state.deployments.some(j=>['queued','running'].includes(j.status)), '请等待当前部署任务结束后再检查');
+        await deployments.runtime.ensureVideo(state.deploymentConfig,AbortSignal.timeout(180000));
+      }
+      return json(res, await probe(config, kind));
     }
     if (u.pathname === '/api/projects' && method === 'POST') {
       const b = await body(req); requireValue(typeof b.name === 'string' && b.name.trim(), '请填写项目名称');
