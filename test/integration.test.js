@@ -40,7 +40,7 @@ test('真实 HTTP 工作流、版本冲突、Comfy 协议、媒体导入和 FFmp
   let state=await(await fetch(base+'/api/state')).json(), token=state.token;
   async function call(url,method='GET',body) {const r=await fetch(base+url,{method,headers:{'Content-Type':'application/json','X-Workspace-Token':token},...(body===undefined?{}:{body:JSON.stringify(body)})});const data=await r.json();assert.ok(r.ok,JSON.stringify(data));return data;}
   const latest=async()=>{state=await call('/api/state');return state.projects[0];};
-  assert.equal(state.catalog.length,4);
+  assert.equal(state.catalog.length,6);
   const wan=await call('/api/video-presets/wan21');assert.equal(wan.durationMode,'wan');
   const badDeploy=await fetch(base+'/api/deployments',{method:'POST',headers:{'Content-Type':'application/json','X-Workspace-Token':token},body:JSON.stringify({modelId:'arbitrary-model'})});assert.equal(badDeploy.status,400);
   await call('/api/deployment/config','PUT',state.deploymentConfig);
@@ -62,6 +62,15 @@ test('真实 HTTP 工作流、版本冲突、Comfy 协议、媒体导入和 FFmp
   assert.match(textRequests[1].messages[1].content,/绿色夹克/);assert.match(textRequests[1].messages[1].content,/听见未来/);
   const generated=await wait((await call('/api/jobs','POST',{projectId:p.id,kind:'video',scene:0,shot:0})).id);
   assert.equal(generated.status,'succeeded',generated.error);assert.equal(receivedGraph['2'].inputs.steps,8);assert.equal(receivedGraph['1'].inputs.text,'a quiet tape repair shop at night');
+  p=await latest();const scriptVersion=p.scriptVersion;
+  p=await call(`/api/projects/${p.id}/shots/0/0/edit`,'POST',{revision:p.revision,prompt:'revised rainy shop',duration:5,params:{steps:9}});
+  assert.equal(p.scriptVersion,scriptVersion);assert.equal(p.stale.review,true);
+  const before=state.jobs.length;
+  const invalidBatch=await fetch(base+'/api/video/batch',{method:'POST',headers:{'Content-Type':'application/json','X-Workspace-Token':token},body:JSON.stringify({projectId:p.id,revision:p.revision,shots:[{scene:0,shot:0},{scene:99,shot:0}]})});assert.equal(invalidBatch.status,400);
+  p=await latest();assert.equal(state.jobs.length,before);
+  const batch=await call('/api/video/batch','POST',{projectId:p.id,revision:p.revision,shots:[{scene:0,shot:0}]});const version2=await wait(batch.ids[0]);assert.equal(version2.status,'succeeded',version2.error);
+  assert.equal(receivedGraph['2'].inputs.steps,9);assert.equal(receivedGraph['1'].inputs.text,'revised rainy shop');
+  p=await latest();p=await call(`/api/projects/${p.id}/shots/0/0/select`,'POST',{revision:p.revision,assetId:generated.assetId});assert.equal(p.selectedShots['0-0'],generated.assetId);
   const upload=await fetch(base+`/api/assets?projectId=${p.id}&name=silent`,{method:'POST',headers:{'X-Workspace-Token':token},body:await readFile(silent)});assert.equal(upload.status,201);const uploaded=await upload.json();assert.equal(uploaded.audio,false);
   p=await latest();p=await call(`/api/projects/${p.id}`,'PUT',{revision:p.revision,timeline:[{assetId:generated.assetId,start:0.25,end:1.25,volume:0.5},{assetId:uploaded.id,start:0,end:0.75,volume:1}]});
   const rendered=await wait((await call('/api/jobs','POST',{projectId:p.id,kind:'export'})).id);assert.equal(rendered.status,'succeeded',rendered.error);
