@@ -249,7 +249,7 @@ export const server = http.createServer(async (req, res) => {
     const mm = u.pathname.match(/^\/media\/([\w-]+)$/);
     if (mm && ['GET', 'HEAD'].includes(method)) {const a = state.assets.find(a => a.id === mm[1]); requireValue(a, '素材不存在', 404); return serveFile(req, res, a.file, a.mime || 'video/mp4');}
     const files = {'/video-workbench.js':['video-workbench.js','text/javascript; charset=utf-8'],'/native-settings.js':['native-settings.js','text/javascript; charset=utf-8'],'/model-hub.js':['model-hub.js','text/javascript; charset=utf-8'], '/text-models.js': ['text-models.js', 'text/javascript; charset=utf-8'], '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8']};
-    if (files[u.pathname] && ['GET', 'HEAD'].includes(method)) return serveFile(req, res, path.join(ROOT, 'public', files[u.pathname][0]), files[u.pathname][1]);
+    if (files[u.pathname] && ['GET', 'HEAD'].includes(method)) {res.setHeader('Cache-Control','no-store');return serveFile(req, res, path.join(ROOT, 'public', files[u.pathname][0]), files[u.pathname][1]);}
     json(res, {error: '接口不存在'}, 404);
   } catch (e) {if (!res.headersSent) json(res, {error: e.message}, e.status || 400); else res.destroy();}
 });

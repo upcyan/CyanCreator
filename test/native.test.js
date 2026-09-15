@@ -5,6 +5,18 @@ import path from 'node:path';
 import {nativePreset,validateNative,NativeVideo,runNativeCommand} from '../lib/native-video.js';
 import {editShot,shotConfig,videoCapabilities} from '../lib/shots.js';
 import {wanPreset} from '../lib/video-presets.js';
+test('原生环境旧标记触发同步，成功复用，失败后可以重试',async()=>{
+  await mkdir('test-output',{recursive:true});
+  const data=await mkdtemp(path.resolve('test-output/env-')),calls=[];
+  let fail=false;
+  const native=new NativeVideo(data,async(exe,args)=>{calls.push(args);if(fail&&args.includes('install'))throw new Error('install failed');return {ready:true};});
+  const config={nativePython:process.execPath,nativeDevice:'cuda'},python=native.python(config),marker=path.join(path.dirname(path.dirname(python)),'cyancreator-ready-v1');
+  await mkdir(path.dirname(python),{recursive:true});await writeFile(python,'fixture');await writeFile(marker,'v1');
+  await native.prepare(config);assert.equal(calls.filter(a=>a.includes('install')).length,2);
+  calls.length=0;await native.prepare(config);assert.equal(calls.filter(a=>a.includes('install')).length,0);
+  await writeFile(marker,'stale');fail=true;await assert.rejects(native.prepare(config),/install failed/);assert.equal(native.installing,false);
+  fail=false;calls.length=0;await native.prepare(config);assert.equal(calls.filter(a=>a.includes('install')).length,2);
+});
 test('原生参数、镜头覆盖、帧数对齐与不同模型隔离',()=>{
   const c=nativePreset(),shot=editShot({prompt:'old',duration:5},{prompt:'rainy shop',duration:6,params:{seed:12,steps:8,width:640,height:368,negative:'watermark'}},c),snapshot=shotConfig(c,shot);
   assert.equal(snapshot.params.frames,97);assert.equal(snapshot.params.seed,12);assert.equal(c.params.seed,42);

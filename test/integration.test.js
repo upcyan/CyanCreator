@@ -38,6 +38,7 @@ test('真实 HTTP 工作流、版本冲突、Comfy 协议、媒体导入和 FFmp
   let logs='';child.stderr.on('data',x=>logs+=x);
   const base=await new Promise((resolve,reject)=>{child.stdout.on('data',d=>{const m=String(d).match(/http:\/\/127\.0\.0\.1:\d+/);if(m)resolve(m[0]);});child.on('error',reject);child.on('exit',code=>reject(new Error(`startup ${code}: ${logs}`)));});
   let state=await(await fetch(base+'/api/state')).json(), token=state.token;
+  for(const asset of ['/','/app.js','/style.css','/video-workbench.js','/native-settings.js']){const response=await fetch(base+asset);assert.equal(response.status,200);assert.equal(response.headers.get('cache-control'),'no-store');await response.arrayBuffer();}
   async function call(url,method='GET',body) {const r=await fetch(base+url,{method,headers:{'Content-Type':'application/json','X-Workspace-Token':token},...(body===undefined?{}:{body:JSON.stringify(body)})});const data=await r.json();assert.ok(r.ok,JSON.stringify(data));return data;}
   const latest=async()=>{state=await call('/api/state');return state.projects[0];};
   assert.equal(state.catalog.length,6);
