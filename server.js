@@ -1,3 +1,5 @@
+import {WorkspaceStore} from './lib/workspace-store.js';
+import {compileShot} from './lib/prompt-compiler.js';
 import {imageDefaults,validateImage,inspectImage,portraitPrompt,generateImage} from './lib/images.js';
 import {SpeechRuntime,speechDefaults,validateSpeech,cloudSpeech} from './lib/speech.js';
 import {inspectAudio,validateTracks} from './lib/audio.js';
@@ -48,7 +50,8 @@ let updateBusy=false,checkedUpdate;
 const updateFile=path.join(DATA,'update-status.json');
 function updateStatus(){try{return JSON.parse(readFileSync(updateFile,'utf8'));}catch{return {phase:'idle'};}}
 if(updateStatus().phase==='restarting')writeFileSync(updateFile,JSON.stringify({...updateStatus(),phase:'succeeded'}));
-function persist() {for(const p of state.projects)stashChapter(p);writeFileSync(dbPath + '.tmp', JSON.stringify(state, null, 2)); renameSync(dbPath + '.tmp', dbPath);}
+const workspaceStore=new WorkspaceStore(dbPath);
+function persist() {for(const p of state.projects)stashChapter(p);workspaceStore.schedule(state);}
 const deployments = new Deployments(state, DATA, persist);
 function shutdown(){for(const controller of controllers.values())controller.abort();deployments.close();process.exit(0);}
 process.on('SIGINT', shutdown);
@@ -56,7 +59,9 @@ process.on('SIGTERM', shutdown);
 for (const job of state.jobs) if (['queued', 'running'].includes(job.status)) {job.status = 'interrupted'; job.error = '工作台已重启；远端任务可能仍在执行，请用任务 ID 检查后再提交。';}
 persist();
 const projectById = id => {const p = state.projects.find(p => p.id === id); requireValue(p, '项目不存在', 404); return p;};
-const publicState = () => ({...state,cloudTemplates,secrets:secretStatus(), videoCapabilities:videoCapabilities(state.settings.video), catalog: publicCatalog(), runtimes: deployments.runtime.status(), deployments: state.deployments.map(({config,...j})=>j), assets: state.assets.map(({file, ...a}) => a), jobs: state.jobs.map(({snapshot, config, runtimeConfig, ...j}) => j)});
+const chapterDirectory=p=>p.episodes.map(e=>({id:e.id,title:e.title,chapters:e.chapters.map(c=>({id:c.id,title:c.title}))}));
+const taskSnapshot=p=>structuredClone({...p,episodes:chapterDirectory(p),history:[]});
+const publicState = () => ({...state,projects:state.projects.map(p=>({...p,episodes:chapterDirectory(p)})),storageError:workspaceStore.error,cloudTemplates,secrets:secretStatus(), videoCapabilities:videoCapabilities(state.settings.video), catalog: publicCatalog(), runtimes: deployments.runtime.status(), deployments: state.deployments.map(({config,...j})=>j), assets: state.assets.map(({file, ...a}) => a), jobs: state.jobs.map(({snapshot, config, runtimeConfig, ...j}) => j)});
 function revise(p) {p.revision++; p.updatedAt = new Date().toISOString();}
 function applyDocument(p, stage, result) {
   p.history.unshift({id: randomUUID(), stage, value: p[stage], revision: p.revision, at: new Date().toISOString()});
@@ -70,7 +75,7 @@ async function body(req) {
   for await (const c of req) {size += c.length; requireValue(size <= 4 * 1024 * 1024, '请求超过 4MB', 413); chunks.push(c);}
   try {return JSON.parse(Buffer.concat(chunks).toString() || '{}');} catch {throw Object.assign(new Error('无效 JSON'), {status: 400});}
 }
-function json(res, data, code = 200) {res.writeHead(code, {'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store'}); res.end(JSON.stringify(data));}
+async function json(res, data, code = 200) {if(!['GET','HEAD'].includes(res.req.method)){try{await workspaceStore.flush();}catch(e){data={error:e.message};code=503;}}res.writeHead(code, {'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store'}); res.end(JSON.stringify(data));}
 async function saveAsset(stream, name, projectId, signal, kind) {
   const id = randomUUID(), file = path.join(MEDIA, `${id}.${kind==='audio'?'wav':kind==='image'?'png':'mp4'}`);
   let bytes = 0;
@@ -88,7 +93,7 @@ function videoJob(p,b){
   requireValue(Number.isInteger(b.scene)&&Number.isInteger(b.shot),'镜头索引无效');
   const shot=p.script.scenes[b.scene]?.shots[b.shot];requireValue(shot,'镜头不存在');
   validateDirection(shot);requireValue((shot.characterIds||[]).every(id=>p.characters.some(c=>c.id===id)),'镜头引用了已移除角色，请重新关联');const config=shotConfig(state.settings.video,shot);
-  return {prompt:shotPrompt(shot,p),chapterId:p.activeChapterId,duration:shot.duration,shotLabel:`${b.scene+1}-${b.shot+1}`,scene:b.scene,shot:b.shot,scriptVersion:p.scriptVersion,config,runtimeConfig:structuredClone(state.deploymentConfig)};
+  return {prompt:compileShot(shot,p,p.script.scenes[b.scene]),chapterId:p.activeChapterId,duration:shot.duration,shotLabel:`${b.scene+1}-${b.shot+1}`,scene:b.scene,shot:b.shot,scriptVersion:p.scriptVersion,config,runtimeConfig:structuredClone(state.deploymentConfig)};
 }
 async function pump() {
   if (pumping) return; pumping = true;
@@ -100,7 +105,7 @@ async function pump() {
       try {
         const p = projectById(job.projectId);
         const remote = id => {job.remoteId = id; persist();};
-        if(job.kind==='speech-deploy'){await speechRuntime.prepare(job.runtimeConfig,controller.signal,event=>{job.progress=event;persist();});job.note='本地语音运行时与权重已验证，可生成配音。';}
+        if(job.kind==='speech-deploy'){await speechRuntime.prepare(job.runtimeConfig,controller.signal,event=>{job.progress=event;persist();});job.note='本地语音运行环境与权重已验证，可生成配音。';}
         else if(job.kind==='speech'){
           let asset;
           if(job.config.provider==='piper'){const folder=path.join(DATA,'speech-jobs',job.id);await mkdir(folder,{recursive:true});const output=path.join(folder,'speech.wav');try{await speechRuntime.generate(job.config,job.text,output,controller.signal);asset=await saveAsset(createReadStream(output),'配音 · '+job.text.slice(0,30),p.id,controller.signal,'audio');}finally{await unlink(output).catch(()=>{});}}
@@ -108,9 +113,9 @@ async function pump() {
           Object.assign(asset,{chapterId:job.chapterId,characterId:job.characterId,text:job.text});job.assetId=asset.id;
         }
         else if(job.kind==='character-image'){const stream=await generateImage(job.config,job.prompt,controller.signal);const asset=await saveAsset(stream,job.characterName+(job.imageMode==='sheet'?' · 三视图':' · 立绘'),p.id,controller.signal,'image');Object.assign(asset,{characterId:job.characterId,chapterId:job.chapterId,imageMode:job.imageMode,jobId:job.id});job.assetId=asset.id;job.note='图片已入库，请预览后选为角色参考。';}
-        else if(job.kind==='assist'){job.result=await assistText(job.snapshot,job.config,job.assist,controller.signal);job.note='伴写候选已保留，确认后应用。';}
+        else if(job.kind==='assist'){job.result=await assistText(job.snapshot,job.config,job.assist,controller.signal,event=>{job.progress=event;persist();});job.note='伴写候选已保留，确认后应用。';}
         else if (['outline', 'script', 'review'].includes(job.kind)) {
-          job.result = await generateText(job.kind, job.snapshot, job.config, controller.signal);
+          job.result = await generateText(job.kind, job.snapshot, job.config, controller.signal,event=>{job.progress=event;persist();});
           controller.signal.throwIfAborted();
           if (p.revision === job.baseRevision) {applyDocument(p, job.kind, job.result); job.applied = true;}
           else job.note = '生成期间项目发生修改，结果已保留，未覆盖当前稿。';
@@ -234,6 +239,7 @@ export const server = http.createServer(async (req, res) => {
       const p = {id: randomUUID(),scriptVersion:randomUUID(), name: b.name.slice(0, 100), brief: '', bible: '', outline: null, script: null, review: null, stale: {}, timeline: [], history: [], revision: 1, updatedAt: new Date().toISOString()};
       initCreation(p);state.projects.unshift(p); persist(); return json(res, p, 201);
     }
+    if(u.pathname==='/api/prompt-preview'&&method==='POST'){const b=await body(req),p=projectById(b.projectId),scene=p.script?.scenes[b.scene],shot=scene?.shots[b.shot];requireValue(shot,'镜头不存在');const prompt=compileShot({...shot,prompt:typeof b.prompt==='string'?b.prompt:shot.prompt},p,scene);return json(res,{prompt,characters:prompt.length,extraTextModelCalls:0});}
     const shotRoute=u.pathname.match(/^\/api\/projects\/([\w-]+)\/shots\/(\d+)\/(\d+)\/(edit|select)$/);
     if(shotRoute&&method==='POST'){
       const p=projectById(shotRoute[1]),b=await body(req),si=Number(shotRoute[2]),i=Number(shotRoute[3]);
@@ -254,7 +260,7 @@ export const server = http.createServer(async (req, res) => {
       requireValue(Array.isArray(b.shots)&&b.shots.length>0&&b.shots.length<=20,'请选择 1–20 个镜头');
       requireValue(new Set(b.shots.map(s=>`${s.scene}-${s.shot}`)).size===b.shots.length,'镜头重复');
       requireValue(state.jobs.filter(j=>['queued','running'].includes(j.status)).length+b.shots.length<=20,'队列容量不足，请减少批量镜头');
-      const jobs=b.shots.map(s=>({id:randomUUID(),projectId:p.id,kind:'video',status:'queued',baseRevision:p.revision,snapshot:structuredClone(p),createdAt:new Date().toISOString(),...videoJob(p,s)}));
+      const jobs=b.shots.map(s=>({id:randomUUID(),projectId:p.id,kind:'video',status:'queued',baseRevision:p.revision,snapshot:taskSnapshot(p),createdAt:new Date().toISOString(),...videoJob(p,s)}));
       state.jobs.unshift(...jobs.reverse());persist();json(res,{ids:jobs.map(j=>j.id)},202);void pump();return;
     }
     const match = u.pathname.match(/^\/api\/projects\/([\w-]+)$/);
@@ -288,7 +294,7 @@ export const server = http.createServer(async (req, res) => {
       if (b.kind === 'script') requireValue(p.outline && !p.stale.outline, '请先生成或确认最新大纲');
       if (b.kind === 'review') requireValue(p.script && !p.stale.script && !p.stale.outline, '请先完成最新剧本');
       if (b.kind === 'export') requireValue(p.timeline.length, '请先添加时间线片段');
-      const job = {id: randomUUID(), projectId: p.id, chapterId:p.activeChapterId, kind: b.kind, status: 'queued', baseRevision: p.revision, snapshot: structuredClone(p), createdAt: new Date().toISOString()};
+      const job = {id: randomUUID(), projectId: p.id, chapterId:p.activeChapterId, kind: b.kind, status: 'queued', baseRevision: p.revision, snapshot: taskSnapshot(p), createdAt: new Date().toISOString()};
       if (['outline', 'script', 'review'].includes(b.kind)) job.config = structuredClone(resolveTextConfig(state.settings.text, b.kind));
       if(b.kind==='speech-deploy'){requireValue(!state.jobs.some(j=>j.kind==='speech-deploy'&&['queued','running'].includes(j.status)),'语音部署已排队');job.runtimeConfig=structuredClone(state.deploymentConfig);}
       if(b.kind==='speech'){requireValue(typeof b.text==='string'&&b.text.trim()&&b.text.length<=10000,'配音文字须为 1–10000 字符');job.text=b.text;job.characterId=b.characterId||'';requireValue(!job.characterId||p.characters.some(c=>c.id===job.characterId),'角色不存在');job.config=structuredClone(state.settings.speech);if(b.voice){requireValue(job.config.provider!=='piper','本地 Piper 当前使用已部署中文音色');job.config.voice=b.voice;}validateSpeech(job.config);}
@@ -304,7 +310,7 @@ export const server = http.createServer(async (req, res) => {
       const job = state.jobs.find(j => j.id === jm[1]); requireValue(job, '任务不存在', 404);
       if (jm[2] === 'cancel') {
         requireValue(['queued', 'running'].includes(job.status), '任务已结束');
-        if (job.status === 'queued') job.status = 'cancelled'; else controllers.get(job.id)?.abort();
+        if (job.status === 'queued') job.status = 'cancelled'; else {job.progress={phase:'cancelling',message:'正在取消本地执行 / 断开远端等待'};controllers.get(job.id)?.abort();}
       } else {
         const b = await body(req), p = projectById(job.projectId);
         requireValue(job.status === 'succeeded' && job.result && !job.applied, '没有可应用的结果');
@@ -321,4 +327,4 @@ export const server = http.createServer(async (req, res) => {
     json(res, {error: '接口不存在'}, 404);
   } catch (e) {if (!res.headersSent) json(res, {error: safeError(e)}, e.status || 400); else res.destroy();}
 });
-server.listen(Number(process.env.PORT || 3210), '127.0.0.1', () => console.log(`CyanCreator 0.4.0 · http://127.0.0.1:${server.address().port}`));
+server.listen(Number(process.env.PORT || 3210), '127.0.0.1', () => console.log(`CyanCreator 0.4.1 · http://127.0.0.1:${server.address().port}`));

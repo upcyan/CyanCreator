@@ -62,7 +62,7 @@ test('真实 HTTP 工作流、版本冲突、Comfy 协议、媒体导入和 FFmp
   assert.deepEqual(textRequests.map(r=>r.temperature),[0.7,0.7,0.2]);
   assert.match(textRequests[1].messages[1].content,/绿色夹克/);assert.match(textRequests[1].messages[1].content,/听见未来/);
   const generated=await wait((await call('/api/jobs','POST',{projectId:p.id,kind:'video',scene:0,shot:0})).id);
-  assert.equal(generated.status,'succeeded',generated.error);assert.equal(receivedGraph['2'].inputs.steps,8);assert.equal(receivedGraph['1'].inputs.text,'a quiet tape repair shop at night');
+  assert.equal(generated.status,'succeeded',generated.error);assert.equal(receivedGraph['2'].inputs.steps,8);assert.equal(receivedGraph['1'].inputs.text,'a quiet tape repair shop at night\n场景：磁带店 / 夜');
   p=await latest();const scriptVersion=p.scriptVersion;
   p=await call(`/api/projects/${p.id}/shots/0/0/edit`,'POST',{revision:p.revision,prompt:'revised rainy shop',duration:5,params:{steps:9}});
   assert.equal(p.scriptVersion,scriptVersion);assert.equal(p.stale.review,true);
@@ -70,7 +70,7 @@ test('真实 HTTP 工作流、版本冲突、Comfy 协议、媒体导入和 FFmp
   const invalidBatch=await fetch(base+'/api/video/batch',{method:'POST',headers:{'Content-Type':'application/json','X-Workspace-Token':token},body:JSON.stringify({projectId:p.id,revision:p.revision,shots:[{scene:0,shot:0},{scene:99,shot:0}]})});assert.equal(invalidBatch.status,400);
   p=await latest();assert.equal(state.jobs.length,before);
   const batch=await call('/api/video/batch','POST',{projectId:p.id,revision:p.revision,shots:[{scene:0,shot:0}]});const version2=await wait(batch.ids[0]);assert.equal(version2.status,'succeeded',version2.error);
-  assert.equal(receivedGraph['2'].inputs.steps,9);assert.equal(receivedGraph['1'].inputs.text,'revised rainy shop');
+  assert.equal(receivedGraph['2'].inputs.steps,9);assert.equal(receivedGraph['1'].inputs.text,'revised rainy shop\n场景：磁带店 / 夜');
   p=await latest();p=await call(`/api/projects/${p.id}/shots/0/0/select`,'POST',{revision:p.revision,assetId:generated.assetId});assert.equal(p.selectedShots['0-0'],generated.assetId);
   const upload=await fetch(base+`/api/assets?projectId=${p.id}&name=silent`,{method:'POST',headers:{'X-Workspace-Token':token},body:await readFile(silent)});assert.equal(upload.status,201);const uploaded=await upload.json();assert.equal(uploaded.audio,false);
   p=await latest();p=await call(`/api/projects/${p.id}`,'PUT',{revision:p.revision,timeline:[{assetId:generated.assetId,start:0.25,end:1.25,volume:0.5},{assetId:uploaded.id,start:0,end:0.75,volume:1}]});
