@@ -10,7 +10,7 @@ function profileCard(p, text) {
   return `<article class="panel shared-model"><div class="panel-head"><div><h3>${esc(p.name)}</h3><p class="hint">${users.length ? '用于 ' + users.map(r => labels[r]).join('、') : '尚未被阶段使用'}</p></div><span class="tag">可复用配置</span></div>
     ${field('name','配置名称')}
     <div class="cols"><div>${field('baseUrl','服务地址 · 本地或云端')}</div><div>${field('model','模型名称 · 与服务端一致')}</div></div>
-    ${field('keyEnv','密钥环境变量名 · 本地可留空')}
+    ${field('keyEnv','密钥保险库引用 / 环境变量名 · 本地可留空')}
     <div class="cols"><div>${field('temperature','默认 Temperature','number','step="0.1" min="0" max="2"')}</div><div>${field('maxTokens','默认最大输出 tokens','number','min="128" max="32768" step="1"')}</div></div>
     <div class="actions model-actions">${btn('测试连接','probe',p.id)}${btn('三个阶段共用','share-profile',p.id)}${btn('复制配置','copy-profile',p.id)}${btn('删除','delete-profile',p.id,users.length > 0 || text.profiles.length === 1)}</div>
     ${users.length ? '<p class="hint">修改此配置会影响所有引用阶段的新任务。删除前请先切换这些阶段的配置。</p>' : ''}</article>`;

@@ -11,7 +11,7 @@ export function shotProgress(p,state,key){
 }
 export function videoWorkbench(p,state,key){
   const shots=flatShots(p),s=currentShot(p,key),c=state.settings.video;
-  const title=c.provider==='native'?'原生 Diffusers':c.provider==='comfy'?'ComfyUI':'MiniMax 云端';
+  const title=c.provider==='native'?'原生 Diffusers':c.provider==='comfy'?'ComfyUI':({seedance:'Seedance 云端',kling:'可灵云端',veo:'Veo 云端'}[c.provider]||'MiniMax 云端');
   if(!s)return `<div class="panel"><h2>等待分镜</h2><p>先在剧本阶段完成分镜，再编辑镜头、批量生成和选择结果版本。</p>${btn('前往剧本','navigate','data-page="script"')}</div>`;
   const jobs=jobsFor(p,state,s),assets=jobs.filter(j=>j.assetId).map(j=>state.assets.find(a=>a.id===j.assetId)).filter(Boolean);
   const selected=assets.find(a=>a.id===p.selectedShots?.[s.key])||assets[0];

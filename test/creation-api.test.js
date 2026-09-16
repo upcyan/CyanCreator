@@ -1,0 +1,35 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import {spawn} from 'node:child_process';
+import {mkdir,mkdtemp,readFile} from 'node:fs/promises';
+import {once} from 'node:events';
+import path from 'node:path';
+import {setTimeout as delay} from 'node:timers/promises';
+test('创作 HTTP：章节隔离、候选确认、角色图生成与引用、密钥不外泄', {timeout:60000},async t=>{
+ await mkdir('test-output',{recursive:true});const folder=await mkdtemp(path.resolve('test-output/creation-api-')),png=await readFile('public/assets/cyancreator-icon.png');let imageRequest,chatRequest;
+ const fixture=http.createServer(async(req,res)=>{let raw='';for await(const c of req)raw+=c;const b=JSON.parse(raw||'{}');res.setHeader('Content-Type','application/json');if(req.url==='/v1/chat/completions'){chatRequest=b;return res.end(JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify({logline:'伴写候选',beats:[{title:'转折',summary:'找到来信者'}]})}}]}));}imageRequest=b;res.end(JSON.stringify(req.url==='/sdapi/v1/txt2img'?{images:[png.toString('base64')]}:{data:[{b64_json:png.toString('base64')}]}));});fixture.listen(0,'127.0.0.1');await once(fixture,'listening');t.after(()=>fixture.close());
+ const child=spawn(process.execPath,['server.js'],{cwd:process.cwd(),env:{...process.env,PORT:'0',CYANCREATOR_DATA:path.join(folder,'data')},windowsHide:true,stdio:['ignore','pipe','pipe']});t.after(()=>child.kill());let errors='';child.stderr.on('data',x=>errors+=x);const base=await new Promise((resolve,reject)=>{child.stdout.on('data',d=>{const m=String(d).match(/http:\/\/127\.0\.0\.1:\d+/);if(m)resolve(m[0]);});child.once('exit',code=>reject(Error('startup '+code+errors)));child.once('error',reject);});
+ let state=await(await fetch(base+'/api/state')).json();const token=state.token;
+ async function call(url,method='GET',body,status=200){const r=await fetch(base+url,{method,headers:{'Content-Type':'application/json','X-Workspace-Token':token},...(body===undefined?{}:{body:JSON.stringify(body)})});const d=await r.json();assert.equal(r.status,status,JSON.stringify(d));return d;}
+ const latest=async()=>{state=await call('/api/state');return state.projects.find(x=>x.id===p.id);};
+ const wait=async id=>{for(let i=0;i<200;i++){await latest();const j=state.jobs.find(j=>j.id===id);if(!['queued','running'].includes(j.status)){assert.equal(j.status,'succeeded',j.error);return j;}await delay(50);}throw Error('job timeout');};
+ let p=await call('/api/projects','POST',{name:'Creation integration'},201);const first=p.activeChapterId;
+ const doc=await call('/api/import-document','POST',{stage:'outline',format:'text',text:'# 开场\n原稿内容'});
+ const draft={stage:'outline',value:doc,brief:'雨夜来信',bible:'都市',characters:[{id:'lin',name:'林舟',appearance:'绿色夹克',personality:'沉静'}],worldbook:[{id:'w',name:'画风',category:'视觉',content:'暖灯冷雨'}]};
+ await call('/api/projects/'+p.id+'/draft','POST',{...draft,revision:p.revision});p=await latest();assert.equal(p.outline.beats[0].summary,'原稿内容');
+ const endpoint='http://127.0.0.1:'+fixture.address().port;for(const c of state.settings.text.profiles){c.baseUrl=endpoint+'/v1';c.model='fixture';c.keyEnv='';}state.settings.image={provider:'compatible',baseUrl:endpoint+'/v1',model:'fixture',keyEnv:'',size:'1024x1536'};await call('/api/settings','PUT',state.settings);
+ const candidate=await wait((await call('/api/jobs','POST',{projectId:p.id,kind:'assist',stage:'outline',mode:'润色',instruction:'完善转折'},202)).id);p=await latest();assert.notEqual(p.outline.logline,'伴写候选');assert.match(chatRequest.messages[1].content,/绿色夹克/);
+ await call('/api/projects/'+p.id+'/structure','POST',{revision:p.revision,action:'episode',title:'第二集'});p=await latest();assert.equal(p.outline,null);await call('/api/jobs/'+candidate.id+'/apply','POST',{revision:p.revision},400);
+ await call('/api/projects/'+p.id+'/structure','POST',{revision:p.revision,action:'switch',id:first});p=await latest();await call('/api/jobs/'+candidate.id+'/apply','POST',{revision:p.revision});p=await latest();assert.equal(p.outline.logline,'伴写候选');assert.equal(p.episodes.length,2);
+ const image=await wait((await call('/api/jobs','POST',{projectId:p.id,kind:'character-image',characterId:'lin',mode:'sheet',instruction:'动画画风'},202)).id);assert.match(imageRequest.prompt,/三视图/);assert.match(imageRequest.prompt,/绿色夹克/);assert.equal(imageRequest.size,'1024x1536');assert.equal(state.assets.find(a=>a.id===image.assetId).kind,'image');p=await latest();await call('/api/projects/'+p.id,'PUT',{revision:p.revision,characterReference:{characterId:'lin',assetId:image.assetId}});p=await latest();assert.equal(p.characterReferences.lin,image.assetId);
+ await call('/api/projects/'+p.id,'PUT',{revision:p.revision,timeline:[{assetId:image.assetId,start:0,end:1,volume:1}]},400);
+ const media=await fetch(base+'/media/'+image.assetId);assert.equal(media.headers.get('content-type'),'image/png');assert.deepEqual(Buffer.from(await media.arrayBuffer()),png);
+ const other=await call('/api/projects','POST',{name:'Other project'},201);await call('/api/projects/'+other.id,'PUT',{revision:other.revision,characterReference:{characterId:'lin',assetId:image.assetId}},400);
+ state.settings.image={...state.settings.image,provider:'automatic1111',baseUrl:endpoint,model:'local-checkpoint'};await call('/api/settings','PUT',state.settings);await wait((await call('/api/jobs','POST',{projectId:p.id,kind:'character-image',characterId:'lin',mode:'portrait',instruction:''},202)).id);assert.equal(imageRequest.override_settings.sd_model_checkpoint,'local-checkpoint');assert.equal(imageRequest.height,1536);
+ const upload=await fetch(base+'/api/assets?'+new URLSearchParams({projectId:p.id,characterId:'lin',kind:'image',name:'import.png'}),{method:'POST',headers:{'X-Workspace-Token':token},body:png});assert.equal(upload.status,201);assert.equal((await upload.json()).characterId,'lin');
+ const invalid=await fetch(base+'/api/assets?'+new URLSearchParams({projectId:p.id,characterId:'lin',kind:'image'}),{method:'POST',headers:{'X-Workspace-Token':token},body:'<svg onload="alert(1)"/>'});assert.equal(invalid.status,400);
+ if(process.platform==='win32'){const value='fixture-private-key-9afe82';await call('/api/secrets','PUT',{name:'IMAGE_API_KEY',value});const publicData=await call('/api/state');assert.equal(JSON.stringify(publicData).includes(value),false);assert.equal(publicData.secrets[0].name,'IMAGE_API_KEY');const db=await readFile(path.join(folder,'data/workspace.json'),'utf8'),vault=await readFile(path.join(folder,'data/secrets/vault.dpapi'));assert.equal(db.includes(value),false);assert.equal(vault.includes(Buffer.from(value)),false);await call('/api/secrets','PUT',{name:'IMAGE_API_KEY',value:''});}
+ for(const file of ['creation-editor.js','character-images.js','audio-panel.js','settings-extra.js','creation.css']){const r=await fetch(base+'/'+file);assert.equal(r.status,200);assert.equal(r.headers.get('cache-control'),'no-store');await r.arrayBuffer();}
+ assert.equal(errors,'');
+});

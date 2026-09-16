@@ -1,4 +1,11 @@
+import {imageDefaults,validateImage,inspectImage,portraitPrompt,generateImage} from './lib/images.js';
+import {SpeechRuntime,speechDefaults,validateSpeech,cloudSpeech} from './lib/speech.js';
+import {inspectAudio,validateTracks} from './lib/audio.js';
 import http from 'node:http';
+import {initCreation,stashChapter,invalidateChapters,mutateStructure,importDocument,validateLibrary,shotPrompt,validateDirection} from './lib/creation.js';
+import {assistText} from './lib/assist.js';
+import {cloudTemplates,cloudPreset,cloudVideo} from './lib/cloud-video.js';
+import {SecretVault,secretStatus,safeError} from './lib/secrets.js';
 import {spawn} from 'node:child_process';
 import {inspectUpdate} from './lib/updates.js';
 import {readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, createReadStream, createWriteStream, statSync} from 'node:fs';
@@ -25,11 +32,13 @@ const MEDIA = path.join(DATA, 'media'); mkdirSync(MEDIA, {recursive: true});
 const dbPath = path.join(DATA, 'workspace.json');
 const state = existsSync(dbPath) ? JSON.parse(readFileSync(dbPath, 'utf8')) : {settings: defaults(), projects: [], jobs: [], assets: []};
 state.settings.text = migrateTextSettings(state.settings.text);
-for(const p of state.projects)p.scriptVersion??=randomUUID();
+state.settings.image??=imageDefaults();state.settings.speech??=speechDefaults();const speechRuntime=new SpeechRuntime(DATA);
+for(const p of state.projects){p.scriptVersion??=randomUUID();initCreation(p);}
+const vault=new SecretVault(DATA);await vault.load();
 // Rebase managed media after the workspace folder is renamed.
 for (const asset of state.assets) {
   if (/^[\w-]+$/.test(asset.id) && !existsSync(asset.file)) {
-    const moved = path.join(MEDIA, `${asset.id}.mp4`);
+    const moved = path.join(MEDIA, `${asset.id}.${asset.kind==='audio'?'wav':asset.kind==='image'?'png':'mp4'}`);
     if (existsSync(moved)) asset.file = moved;
   }
 }
@@ -39,7 +48,7 @@ let updateBusy=false,checkedUpdate;
 const updateFile=path.join(DATA,'update-status.json');
 function updateStatus(){try{return JSON.parse(readFileSync(updateFile,'utf8'));}catch{return {phase:'idle'};}}
 if(updateStatus().phase==='restarting')writeFileSync(updateFile,JSON.stringify({...updateStatus(),phase:'succeeded'}));
-function persist() {writeFileSync(dbPath + '.tmp', JSON.stringify(state, null, 2)); renameSync(dbPath + '.tmp', dbPath);}
+function persist() {for(const p of state.projects)stashChapter(p);writeFileSync(dbPath + '.tmp', JSON.stringify(state, null, 2)); renameSync(dbPath + '.tmp', dbPath);}
 const deployments = new Deployments(state, DATA, persist);
 function shutdown(){for(const controller of controllers.values())controller.abort();deployments.close();process.exit(0);}
 process.on('SIGINT', shutdown);
@@ -47,7 +56,7 @@ process.on('SIGTERM', shutdown);
 for (const job of state.jobs) if (['queued', 'running'].includes(job.status)) {job.status = 'interrupted'; job.error = '工作台已重启；远端任务可能仍在执行，请用任务 ID 检查后再提交。';}
 persist();
 const projectById = id => {const p = state.projects.find(p => p.id === id); requireValue(p, '项目不存在', 404); return p;};
-const publicState = () => ({...state, videoCapabilities:videoCapabilities(state.settings.video), catalog: publicCatalog(), runtimes: deployments.runtime.status(), deployments: state.deployments.map(({config,...j})=>j), assets: state.assets.map(({file, ...a}) => a), jobs: state.jobs.map(({snapshot, config, runtimeConfig, ...j}) => j)});
+const publicState = () => ({...state,cloudTemplates,secrets:secretStatus(), videoCapabilities:videoCapabilities(state.settings.video), catalog: publicCatalog(), runtimes: deployments.runtime.status(), deployments: state.deployments.map(({config,...j})=>j), assets: state.assets.map(({file, ...a}) => a), jobs: state.jobs.map(({snapshot, config, runtimeConfig, ...j}) => j)});
 function revise(p) {p.revision++; p.updatedAt = new Date().toISOString();}
 function applyDocument(p, stage, result) {
   p.history.unshift({id: randomUUID(), stage, value: p[stage], revision: p.revision, at: new Date().toISOString()});
@@ -62,13 +71,13 @@ async function body(req) {
   try {return JSON.parse(Buffer.concat(chunks).toString() || '{}');} catch {throw Object.assign(new Error('无效 JSON'), {status: 400});}
 }
 function json(res, data, code = 200) {res.writeHead(code, {'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store'}); res.end(JSON.stringify(data));}
-async function saveAsset(stream, name, projectId, signal) {
-  const id = randomUUID(), file = path.join(MEDIA, `${id}.mp4`);
+async function saveAsset(stream, name, projectId, signal, kind) {
+  const id = randomUUID(), file = path.join(MEDIA, `${id}.${kind==='audio'?'wav':kind==='image'?'png':'mp4'}`);
   let bytes = 0;
-  const limiter = new Transform({transform(chunk, _, cb) {bytes += chunk.length; cb(bytes > 512 * 1024 * 1024 ? new Error('素材超过 512MB') : null, chunk);}});
+  const limiter = new Transform({transform(chunk, _, cb) {bytes += chunk.length; cb(bytes > (kind==='image'?20:512) * 1024 * 1024 ? new Error('素材超过 512MB') : null, chunk);}});
   try {
     await pipeline(stream, limiter, createWriteStream(file), {signal});
-    const metadata = await inspect(file, signal);
+    const metadata = await (kind==='audio'?inspectAudio(file,signal):kind==='image'?inspectImage(file,signal):inspect(file,signal));
     const asset = {id, name: String(name).slice(0, 120), projectId, file, ...metadata, createdAt: new Date().toISOString(), url: `/media/${id}`};
     state.assets.push(asset); persist(); return asset;
   } catch (e) {await unlink(file).catch(() => {}); throw e;}
@@ -78,8 +87,8 @@ function videoJob(p,b){
   requireValue(p.script&&!p.stale.script&&!p.stale.outline,'剧本已过期，请先确认最新稿');
   requireValue(Number.isInteger(b.scene)&&Number.isInteger(b.shot),'镜头索引无效');
   const shot=p.script.scenes[b.scene]?.shots[b.shot];requireValue(shot,'镜头不存在');
-  const config=shotConfig(state.settings.video,shot);
-  return {prompt:shot.prompt,duration:shot.duration,shotLabel:`${b.scene+1}-${b.shot+1}`,scene:b.scene,shot:b.shot,scriptVersion:p.scriptVersion,config,runtimeConfig:structuredClone(state.deploymentConfig)};
+  validateDirection(shot);requireValue((shot.characterIds||[]).every(id=>p.characters.some(c=>c.id===id)),'镜头引用了已移除角色，请重新关联');const config=shotConfig(state.settings.video,shot);
+  return {prompt:shotPrompt(shot,p),chapterId:p.activeChapterId,duration:shot.duration,shotLabel:`${b.scene+1}-${b.shot+1}`,scene:b.scene,shot:b.shot,scriptVersion:p.scriptVersion,config,runtimeConfig:structuredClone(state.deploymentConfig)};
 }
 async function pump() {
   if (pumping) return; pumping = true;
@@ -91,7 +100,16 @@ async function pump() {
       try {
         const p = projectById(job.projectId);
         const remote = id => {job.remoteId = id; persist();};
-        if (['outline', 'script', 'review'].includes(job.kind)) {
+        if(job.kind==='speech-deploy'){await speechRuntime.prepare(job.runtimeConfig,controller.signal,event=>{job.progress=event;persist();});job.note='本地语音运行时与权重已验证，可生成配音。';}
+        else if(job.kind==='speech'){
+          let asset;
+          if(job.config.provider==='piper'){const folder=path.join(DATA,'speech-jobs',job.id);await mkdir(folder,{recursive:true});const output=path.join(folder,'speech.wav');try{await speechRuntime.generate(job.config,job.text,output,controller.signal);asset=await saveAsset(createReadStream(output),'配音 · '+job.text.slice(0,30),p.id,controller.signal,'audio');}finally{await unlink(output).catch(()=>{});}}
+          else{const response=await cloudSpeech(job.config,job.text,controller.signal);asset=await saveAsset(Readable.fromWeb(response.body),'配音 · '+job.text.slice(0,30),p.id,controller.signal,'audio');}
+          Object.assign(asset,{chapterId:job.chapterId,characterId:job.characterId,text:job.text});job.assetId=asset.id;
+        }
+        else if(job.kind==='character-image'){const stream=await generateImage(job.config,job.prompt,controller.signal);const asset=await saveAsset(stream,job.characterName+(job.imageMode==='sheet'?' · 三视图':' · 立绘'),p.id,controller.signal,'image');Object.assign(asset,{characterId:job.characterId,chapterId:job.chapterId,imageMode:job.imageMode,jobId:job.id});job.assetId=asset.id;job.note='图片已入库，请预览后选为角色参考。';}
+        else if(job.kind==='assist'){job.result=await assistText(job.snapshot,job.config,job.assist,controller.signal);job.note='伴写候选已保留，确认后应用。';}
+        else if (['outline', 'script', 'review'].includes(job.kind)) {
           job.result = await generateText(job.kind, job.snapshot, job.config, controller.signal);
           controller.signal.throwIfAborted();
           if (p.revision === job.baseRevision) {applyDocument(p, job.kind, job.result); job.applied = true;}
@@ -103,20 +121,20 @@ async function pump() {
             try{asset=await saveAsset(createReadStream(output.file),`镜头 ${job.shotLabel}`,p.id,controller.signal);}finally{await output.cleanup();}
           }else{
             job.progress={phase:'remote',message:'等待远端推理结果'};persist();
-            const response = job.config.provider === 'comfy' ? await comfyVideo(job.config, job.prompt, controller.signal, remote) : await minimaxVideo(job.config, job.prompt, job.duration, controller.signal, remote);
+            const response = job.config.provider === 'comfy' ? await comfyVideo(job.config, job.prompt, controller.signal, remote) : ['seedance','kling','veo'].includes(job.config.provider)?await cloudVideo(job.config,job.prompt,job.duration,controller.signal,remote):await minimaxVideo(job.config, job.prompt, job.duration, controller.signal, remote);
             asset=await saveAsset(Readable.fromWeb(response.body),`镜头 ${job.shotLabel}`,p.id,controller.signal);
           }
           Object.assign(asset,{scene:job.scene,shot:job.shot,scriptVersion:job.scriptVersion,jobId:job.id});job.assetId=asset.id;job.progress={phase:'complete'};
         } else {
           const folder = path.join(DATA, 'renders', job.id); await mkdir(folder, {recursive: true});
           const file = path.join(MEDIA, `${job.id}.mp4`);
-          const info = await render(job.snapshot.timeline, state.assets.filter(a => a.projectId === p.id), folder, file, controller.signal);
+          const info = await render(job.snapshot.timeline, state.assets.filter(a => a.projectId === p.id), folder, file, controller.signal, job.snapshot.audioTracks||[]);
           controller.signal.throwIfAborted();
           const asset = {id: job.id, file, name: `${job.snapshot.name} · 成片`, projectId: p.id, ...info, url: `/media/${job.id}`, exported: true, createdAt: new Date().toISOString()};
           state.assets.push(asset); job.assetId = asset.id;
         }
         job.status = 'succeeded';
-      } catch (e) {job.status = controller.signal.aborted ? 'cancelled' : 'failed'; job.error = controller.signal.aborted ? job.config?.provider==='native'?'原生推理已停止，未完成视频不会入库。':'已停止本地等待；已提交的远端任务可能继续执行。' : e.message;}
+      } catch (e) {job.status = controller.signal.aborted ? 'cancelled' : 'failed'; job.error = controller.signal.aborted ? job.config?.provider==='native'?'原生推理已停止，未完成视频不会入库。':'已停止本地等待；已提交的远端任务可能继续执行。' : safeError(e);}
       finally {job.finishedAt = new Date().toISOString(); job.elapsedMs = Date.parse(job.finishedAt) - Date.parse(job.startedAt); controllers.delete(job.id); persist();}
     }
   } finally {pumping = false;}
@@ -164,6 +182,25 @@ export const server = http.createServer(async (req, res) => {
       }catch(error){updateBusy=false;throw error;}
     }
     if(u.pathname==='/updates.js'&&['GET','HEAD'].includes(method)){res.setHeader('Cache-Control','no-store');return serveFile(req,res,path.join(ROOT,'public','updates.js'),'text/javascript; charset=utf-8');}
+
+    if(u.pathname==='/api/secrets'&&method==='PUT'){const b=await body(req);await vault.set(b.name,b.value);return json(res,{ok:true,secrets:secretStatus()});}
+    if(u.pathname.startsWith('/api/cloud-presets/')&&method==='GET')return json(res,cloudPreset(u.pathname.split('/').at(-1)));
+    if(u.pathname==='/api/import-document'&&method==='POST'){const b=await body(req);return json(res,importDocument(b.stage,b.text,b.format));}
+    const creation=u.pathname.match(/^\/api\/projects\/([\w-]+)\/(structure|draft)$/);
+    if(creation&&method==='POST'){
+      const original=projectById(creation[1]),b=await body(req),p=structuredClone(original);requireValue(b.revision===p.revision,'项目已变化，请刷新后重试',409);
+      if(creation[2]==='structure')mutateStructure(p,b);
+      else {
+        for(const key of ['brief','bible']){requireValue(typeof b[key]==='string'&&b[key].length<=50000,'设定文字过长');if(b[key]!==p[key])invalidateChapters(p);p[key]=b[key];}
+        const characters=validateLibrary(b.characters,'characters'),worldbook=validateLibrary(b.worldbook,'worldbook');
+        if(JSON.stringify(characters)!==JSON.stringify(p.characters)||JSON.stringify(worldbook)!==JSON.stringify(p.worldbook))invalidateChapters(p);
+        p.characters=characters;p.worldbook=worldbook;
+        if(b.value){requireValue(['outline','script'].includes(b.stage),'无效阶段');if(b.stage==='script')for(const scene of b.value.scenes||[])for(const shot of scene.shots||[])validateDirection(shot);if(JSON.stringify(b.value)!==JSON.stringify(p[b.stage])||p.stale[b.stage])applyDocument(p,b.stage,validateDocument(b.stage,b.value));}
+      }
+      revise(p);Object.assign(original,p);persist();return json(res,p);
+    }
+    const extraFiles={'/character-images.js':'text/javascript','/audio-panel.js':'text/javascript','/creation-editor.js':'text/javascript','/settings-extra.js':'text/javascript','/creation.css':'text/css','/assets/cyancreator-icon.png':'image/png'};
+    if(extraFiles[u.pathname]&&['GET','HEAD'].includes(method)){res.setHeader('Cache-Control','no-store');return serveFile(req,res,path.join(ROOT,'public',u.pathname.slice(1)),extraFiles[u.pathname]);}
     if (u.pathname === '/api/state' && method === 'GET') return json(res, {...publicState(), token});
     if (u.pathname === '/api/h3-preset' && method === 'GET') return json(res, h3Preset());
     const preset = u.pathname.match(/^\/api\/video-presets\/([\w-]+)$/);
@@ -195,7 +232,7 @@ export const server = http.createServer(async (req, res) => {
     if (u.pathname === '/api/projects' && method === 'POST') {
       const b = await body(req); requireValue(typeof b.name === 'string' && b.name.trim(), '请填写项目名称');
       const p = {id: randomUUID(),scriptVersion:randomUUID(), name: b.name.slice(0, 100), brief: '', bible: '', outline: null, script: null, review: null, stale: {}, timeline: [], history: [], revision: 1, updatedAt: new Date().toISOString()};
-      state.projects.unshift(p); persist(); return json(res, p, 201);
+      initCreation(p);state.projects.unshift(p); persist(); return json(res, p, 201);
     }
     const shotRoute=u.pathname.match(/^\/api\/projects\/([\w-]+)\/shots\/(\d+)\/(\d+)\/(edit|select)$/);
     if(shotRoute&&method==='POST'){
@@ -226,10 +263,12 @@ export const server = http.createServer(async (req, res) => {
       requireValue(b.revision === p.revision, '项目已变化，请刷新后重试', 409);
       if ('stage' in b) {requireValue(['outline', 'script', 'review'].includes(b.stage), '无效阶段'); applyDocument(p, b.stage, validateDocument(b.stage, b.value));}
       else {
-        for (const key of ['name', 'brief', 'bible']) if (key in b) {requireValue(typeof b[key] === 'string' && b[key].length <= 50000, '文本长度无效'); if (b[key] !== p[key] && key !== 'name') for (const stage of ['outline', 'script', 'review']) p.stale[stage] = !!p[stage]; p[key] = b[key];}
+        for (const key of ['name', 'brief', 'bible']) if (key in b) {requireValue(typeof b[key] === 'string' && b[key].length <= 50000, '文本长度无效'); if (b[key] !== p[key] && key !== 'name') invalidateChapters(p); p[key] = b[key];}
+        if('characterReference' in b){const {characterId,assetId}=b.characterReference;requireValue(p.characters.some(c=>c.id===characterId),'角色不存在');requireValue(state.assets.some(a=>a.id===assetId&&a.kind==='image'&&a.projectId===p.id&&a.characterId===characterId),'图片不属于此角色');p.characterReferences??={};p.characterReferences[characterId]=assetId;}
+        if('audioTracks' in b)p.audioTracks=validateTracks(b.audioTracks,state.assets.filter(a=>a.projectId===p.id));
         if ('timeline' in b) {
           requireValue(Array.isArray(b.timeline) && b.timeline.length <= 200, '时间线格式错误');
-          for (const clip of b.timeline) {const a = state.assets.find(a => a.id === clip.assetId && a.projectId === p.id); requireValue(a, '素材不属于本项目'); number(clip.start, 0, a.duration, '入点'); number(clip.end, clip.start + 0.04, a.duration + 0.02, '出点'); number(clip.volume, 0, 2, '音量');}
+          for (const clip of b.timeline) {const a = state.assets.find(a => a.id === clip.assetId && a.projectId === p.id); requireValue(a&&!['audio','image'].includes(a.kind), '视频素材不属于本项目'); number(clip.start, 0, a.duration, '入点'); number(clip.end, clip.start + 0.04, a.duration + 0.02, '出点'); number(clip.volume, 0, 2, '音量');}
           p.timeline = b.timeline;
         }
         revise(p);
@@ -238,18 +277,23 @@ export const server = http.createServer(async (req, res) => {
     }
     if (u.pathname === '/api/assets' && method === 'POST') {
       const p = projectById(u.searchParams.get('projectId'));
-      const a = await saveAsset(req, u.searchParams.get('name') || '导入素材', p.id); const {file, ...safe} = a; return json(res, safe, 201);
+      const characterId=u.searchParams.get('characterId');if(u.searchParams.get('kind')==='image')requireValue(p.characters.some(c=>c.id===characterId),'请选择本项目角色');
+      const a = await saveAsset(req, u.searchParams.get('name') || '导入素材', p.id,undefined,['audio','image'].includes(u.searchParams.get('kind'))?u.searchParams.get('kind'):undefined); if(a.kind==='image'){a.characterId=characterId;persist();}const {file, ...safe} = a; return json(res, safe, 201);
     }
     if (u.pathname === '/api/jobs' && method === 'POST') {
       const b = await body(req), p = projectById(b.projectId);
-      requireValue(['outline', 'script', 'review', 'video', 'export'].includes(b.kind), '无效任务类型');
+      requireValue(['outline', 'script', 'review', 'video', 'export','assist','speech','speech-deploy','character-image'].includes(b.kind), '无效任务类型');
       requireValue(state.jobs.filter(j => ['queued', 'running'].includes(j.status)).length < 20, '队列已满');
       if (b.kind === 'outline') requireValue(p.brief.trim(), '请先保存创作简报');
       if (b.kind === 'script') requireValue(p.outline && !p.stale.outline, '请先生成或确认最新大纲');
       if (b.kind === 'review') requireValue(p.script && !p.stale.script && !p.stale.outline, '请先完成最新剧本');
       if (b.kind === 'export') requireValue(p.timeline.length, '请先添加时间线片段');
-      const job = {id: randomUUID(), projectId: p.id, kind: b.kind, status: 'queued', baseRevision: p.revision, snapshot: structuredClone(p), createdAt: new Date().toISOString()};
+      const job = {id: randomUUID(), projectId: p.id, chapterId:p.activeChapterId, kind: b.kind, status: 'queued', baseRevision: p.revision, snapshot: structuredClone(p), createdAt: new Date().toISOString()};
       if (['outline', 'script', 'review'].includes(b.kind)) job.config = structuredClone(resolveTextConfig(state.settings.text, b.kind));
+      if(b.kind==='speech-deploy'){requireValue(!state.jobs.some(j=>j.kind==='speech-deploy'&&['queued','running'].includes(j.status)),'语音部署已排队');job.runtimeConfig=structuredClone(state.deploymentConfig);}
+      if(b.kind==='speech'){requireValue(typeof b.text==='string'&&b.text.trim()&&b.text.length<=10000,'配音文字须为 1–10000 字符');job.text=b.text;job.characterId=b.characterId||'';requireValue(!job.characterId||p.characters.some(c=>c.id===job.characterId),'角色不存在');job.config=structuredClone(state.settings.speech);if(b.voice){requireValue(job.config.provider!=='piper','本地 Piper 当前使用已部署中文音色');job.config.voice=b.voice;}validateSpeech(job.config);}
+      if(b.kind==='character-image'){const c=p.characters.find(c=>c.id===b.characterId);requireValue(c,'请先保存角色');Object.assign(job,{characterId:c.id,characterName:c.name,imageMode:b.mode,prompt:portraitPrompt(c,b.mode,b.instruction||'',p.worldbook),config:structuredClone(validateImage(state.settings.image))});}
+      if(b.kind==='assist'){requireValue(['outline','script','characters'].includes(b.stage)&&typeof b.instruction==='string'&&b.instruction.length<=10000,'伴写要求无效');job.assist={stage:b.stage,mode:String(b.mode||'续写').slice(0,100),instruction:b.instruction};job.config=structuredClone(resolveTextConfig(state.settings.text,b.stage==='outline'?'outline':'script'));}
       if (b.kind === 'video') {
         Object.assign(job,videoJob(p,b));
       }
@@ -265,7 +309,8 @@ export const server = http.createServer(async (req, res) => {
         const b = await body(req), p = projectById(job.projectId);
         requireValue(job.status === 'succeeded' && job.result && !job.applied, '没有可应用的结果');
         requireValue(b.revision === p.revision, '项目已变化，请刷新后重试', 409);
-        applyDocument(p, job.kind, job.result); job.applied = true;
+        requireValue(!job.chapterId||job.chapterId===p.activeChapterId,'请先切换到任务所属章节');
+        if(job.kind==='assist'&&job.assist.stage==='characters'){p.characters=validateLibrary([...p.characters,...job.result.characters],'characters');invalidateChapters(p);revise(p);}else applyDocument(p,job.kind==='assist'?job.assist.stage:job.kind,job.result);job.applied=true;
       }
       persist(); return json(res, {ok: true});
     }
@@ -274,6 +319,6 @@ export const server = http.createServer(async (req, res) => {
     const files = {'/video-workbench.js':['video-workbench.js','text/javascript; charset=utf-8'],'/native-settings.js':['native-settings.js','text/javascript; charset=utf-8'],'/model-hub.js':['model-hub.js','text/javascript; charset=utf-8'], '/text-models.js': ['text-models.js', 'text/javascript; charset=utf-8'], '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8']};
     if (files[u.pathname] && ['GET', 'HEAD'].includes(method)) {res.setHeader('Cache-Control','no-store');return serveFile(req, res, path.join(ROOT, 'public', files[u.pathname][0]), files[u.pathname][1]);}
     json(res, {error: '接口不存在'}, 404);
-  } catch (e) {if (!res.headersSent) json(res, {error: e.message}, e.status || 400); else res.destroy();}
+  } catch (e) {if (!res.headersSent) json(res, {error: safeError(e)}, e.status || 400); else res.destroy();}
 });
-server.listen(Number(process.env.PORT || 3210), '127.0.0.1', () => console.log(`CyanCreator 0.3.0 · http://127.0.0.1:${server.address().port}`));
+server.listen(Number(process.env.PORT || 3210), '127.0.0.1', () => console.log(`CyanCreator 0.4.0 · http://127.0.0.1:${server.address().port}`));
