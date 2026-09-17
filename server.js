@@ -6,6 +6,7 @@ import {inspectAudio,validateTracks} from './lib/audio.js';
 import http from 'node:http';
 import {initCreation,stashChapter,invalidateChapters,mutateStructure,importDocument,validateLibrary,shotPrompt,validateDirection} from './lib/creation.js';
 import {assistText} from './lib/assist.js';
+import {guideTurn} from './lib/guide.js';
 import {cloudTemplates,cloudPreset,cloudVideo} from './lib/cloud-video.js';
 import {SecretVault,secretStatus,safeError} from './lib/secrets.js';
 import {spawn} from 'node:child_process';
@@ -64,7 +65,7 @@ const chapterDirectory=p=>p.episodes.map(e=>({id:e.id,title:e.title,chapters:e.c
 // Minimal snapshot: queued jobs only consume writing context, timeline and audio plans.
 // Cloning the full project here used to multiply workspace.json by every queued task.
 const taskSnapshot=p=>structuredClone({name:p.name,activeChapterId:p.activeChapterId,brief:p.brief,bible:p.bible,characters:p.characters,worldbook:p.worldbook,outline:p.outline,script:p.script,review:p.review,timeline:p.timeline||[],audioTracks:p.audioTracks||[],episodes:chapterDirectory(p)});
-const publicState = () => ({...state,projects:state.projects.map(p=>({...p,episodes:chapterDirectory(p)})),storageError:workspaceStore.error,cloudTemplates,secrets:secretStatus(), videoCapabilities:videoCapabilities(state.settings.video), catalog: publicCatalog(), runtimes: deployments.runtime.status(), deployments: state.deployments.map(({config,...j})=>j), assets: state.assets.map(({file, ...a}) => a), jobs: state.jobs.map(({snapshot, config, runtimeConfig, ...j}) => j)});
+const publicState = () => ({...state,projects:state.projects.map(p=>({...p,episodes:chapterDirectory(p)})),storageError:workspaceStore.error,cloudTemplates,secrets:secretStatus(), videoCapabilities:videoCapabilities(state.settings.video), catalog: publicCatalog(), runtimes: deployments.runtime.status(), deployments: state.deployments.map(({config,...j})=>j), assets: state.assets.map(({file, ...a}) => a), jobs: state.jobs.map(({snapshot, config, runtimeConfig, guideHistory, ...j}) => j)});
 function revise(p) {p.revision++; p.updatedAt = new Date().toISOString();}
 function applyDocument(p, stage, result) {
   p.history.unshift({id: randomUUID(), stage, value: p[stage], revision: p.revision, at: new Date().toISOString()});
@@ -119,6 +120,7 @@ async function pump() {
           Object.assign(asset,{chapterId:job.chapterId,characterId:job.characterId,text:job.text});job.assetId=asset.id;
         }
         else if(job.kind==='character-image'){const stream=await generateImage(job.config,job.prompt,controller.signal);const asset=await saveAsset(stream,job.characterName+(job.imageMode==='sheet'?' · 三视图':' · 立绘'),p.id,controller.signal,'image');Object.assign(asset,{characterId:job.characterId,chapterId:job.chapterId,imageMode:job.imageMode,jobId:job.id});job.assetId=asset.id;job.note='图片已入库，请预览后选为角色参考。';}
+        else if(job.kind==='guide'){job.result=await guideTurn(job.snapshot,job.config,job.guide,job.guideHistory,controller.signal,event=>{job.progress=event;persist();});controller.signal.throwIfAborted();}
         else if(job.kind==='assist'){job.result=await assistText(job.snapshot,job.config,job.assist,controller.signal,event=>{job.progress=event;persist();});job.note='伴写候选已保留，确认后应用。';}
         else if (['outline', 'script', 'review'].includes(job.kind)) {
           job.result = await generateText(job.kind, job.snapshot, job.config, controller.signal,event=>{job.progress=event;persist();});
@@ -210,7 +212,7 @@ export const server = http.createServer(async (req, res) => {
       }
       revise(p);Object.assign(original,p);persist();return json(res,p);
     }
-    const extraFiles={'/character-images.js':'text/javascript','/audio-panel.js':'text/javascript','/creation-editor.js':'text/javascript','/settings-extra.js':'text/javascript','/creation.css':'text/css','/assets/cyancreator-icon.png':'image/png'};
+    const extraFiles={'/guide.js':'text/javascript','/character-images.js':'text/javascript','/audio-panel.js':'text/javascript','/creation-editor.js':'text/javascript','/settings-extra.js':'text/javascript','/creation.css':'text/css','/assets/cyancreator-icon.png':'image/png'};
     if(extraFiles[u.pathname]&&['GET','HEAD'].includes(method)){res.setHeader('Cache-Control','no-store');return serveFile(req,res,path.join(ROOT,'public',u.pathname.slice(1)),extraFiles[u.pathname]);}
     if (u.pathname === '/api/state' && method === 'GET') return json(res, {...publicState(), token});
     if (u.pathname === '/api/h3-preset' && method === 'GET') return json(res, h3Preset());
@@ -294,7 +296,7 @@ export const server = http.createServer(async (req, res) => {
     }
     if (u.pathname === '/api/jobs' && method === 'POST') {
       const b = await body(req), p = projectById(b.projectId);
-      requireValue(['outline', 'script', 'review', 'video', 'export','assist','speech','speech-deploy','character-image'].includes(b.kind), '无效任务类型');
+      requireValue(['outline', 'script', 'review', 'video', 'export','assist','guide','speech','speech-deploy','character-image'].includes(b.kind), '无效任务类型');
       requireValue(state.jobs.filter(j => ['queued', 'running'].includes(j.status)).length < 20, '队列已满');
       if (b.kind === 'outline') requireValue(p.brief.trim(), '请先保存创作简报');
       if (b.kind === 'script') requireValue(p.outline && !p.stale.outline, '请先生成或确认最新大纲');
@@ -305,7 +307,13 @@ export const server = http.createServer(async (req, res) => {
       if(b.kind==='speech-deploy'){requireValue(!state.jobs.some(j=>j.kind==='speech-deploy'&&['queued','running'].includes(j.status)),'语音部署已排队');job.runtimeConfig=structuredClone(state.deploymentConfig);}
       if(b.kind==='speech'){requireValue(typeof b.text==='string'&&b.text.trim()&&b.text.length<=10000,'配音文字须为 1–10000 字符');job.text=b.text;job.characterId=b.characterId||'';requireValue(!job.characterId||p.characters.some(c=>c.id===job.characterId),'角色不存在');job.config=structuredClone(state.settings.speech);if(b.voice){requireValue(job.config.provider!=='piper','本地 Piper 当前使用已部署中文音色');job.config.voice=b.voice;}validateSpeech(job.config);}
       if(b.kind==='character-image'){const c=p.characters.find(c=>c.id===b.characterId);requireValue(c,'请先保存角色');Object.assign(job,{characterId:c.id,characterName:c.name,imageMode:b.mode,prompt:portraitPrompt(c,b.mode,b.instruction||'',p.worldbook),config:structuredClone(validateImage(state.settings.image))});}
-      if(b.kind==='assist'){requireValue(['outline','script','characters'].includes(b.stage)&&typeof b.instruction==='string'&&b.instruction.length<=10000,'伴写要求无效');job.assist={stage:b.stage,mode:String(b.mode||'续写').slice(0,100),instruction:b.instruction};job.config=structuredClone(resolveTextConfig(state.settings.text,b.stage==='outline'?'outline':'script'));}
+      if(b.kind==='guide'){
+requireValue(['outline','script','production'].includes(b.stage)&&typeof b.message==='string'&&b.message.trim()&&b.message.length<=6000,'请填写 1–6000 字的引导消息并选择阶段');
+requireValue(!state.jobs.some(j=>j.kind==='guide'&&j.projectId===p.id&&j.chapterId===p.activeChapterId&&['queued','running'].includes(j.status)),'请等待当前回复完成或先取消');
+job.guide={stage:b.stage,message:b.message.trim()};job.guideHistory=state.jobs.filter(j=>j.kind==='guide'&&j.projectId===p.id&&j.chapterId===p.activeChapterId&&j.status==='succeeded').slice(0,8).map(j=>({status:j.status,guide:j.guide,result:{reply:j.result.reply}}));
+job.config=structuredClone(resolveTextConfig(state.settings.text,b.stage==='outline'?'outline':'script'));
+}
+if(b.kind==='assist'){requireValue(['outline','script','characters'].includes(b.stage)&&typeof b.instruction==='string'&&b.instruction.length<=10000,'伴写要求无效');job.assist={stage:b.stage,mode:String(b.mode||'续写').slice(0,100),instruction:b.instruction};job.config=structuredClone(resolveTextConfig(state.settings.text,b.stage==='outline'?'outline':'script'));}
       if (b.kind === 'video') {
         Object.assign(job,videoJob(p,b));
       }
@@ -322,7 +330,7 @@ export const server = http.createServer(async (req, res) => {
         requireValue(job.status === 'succeeded' && job.result && !job.applied, '没有可应用的结果');
         requireValue(b.revision === p.revision, '项目已变化，请刷新后重试', 409);
         requireValue(!job.chapterId||job.chapterId===p.activeChapterId,'请先切换到任务所属章节');
-        if(job.kind==='assist'&&job.assist.stage==='characters'){p.characters=validateLibrary([...p.characters,...job.result.characters],'characters');invalidateChapters(p);revise(p);}else applyDocument(p,job.kind==='assist'?job.assist.stage:job.kind,job.result);job.applied=true;
+        if(job.kind==='guide'){requireValue(job.result.candidate&&['outline','script'].includes(job.guide.stage),'此回复没有可应用的稿件');requireValue(p.revision===job.baseRevision,'生成后稿件已修改，请基于最新稿件重新整理候选',409);applyDocument(p,job.guide.stage,job.result.candidate);}else if(job.kind==='assist'&&job.assist.stage==='characters'){p.characters=validateLibrary([...p.characters,...job.result.characters],'characters');invalidateChapters(p);revise(p);}else applyDocument(p,job.kind==='assist'?job.assist.stage:job.kind,job.result);job.applied=true;
       }
       persist(); return json(res, {ok: true});
     }
