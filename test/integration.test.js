@@ -50,6 +50,7 @@ test('真实 HTTP 工作流、版本冲突、Comfy 协议、媒体导入和 FFmp
   const wait=async id=>{for(let i=0;i<160;i++){await latest();const j=state.jobs.find(j=>j.id===id);if(!['queued','running'].includes(j.status))return j;await delay(100);}throw new Error('job timeout');};
   let p=await call('/api/projects','POST',{name:'Integration fixture'});
   p=await call(`/api/projects/${p.id}`,'PUT',{revision:p.revision,brief:'一位修磁带的人听见未来',bible:'主角始终穿绿色夹克'});
+  p=await call(`/api/projects/${p.id}/draft`,'POST',{revision:p.revision,brief:p.brief,bible:p.bible,characters:[{id:'fixture-char',name:'主角'}],worldbook:[]});assert.equal(p.characters.length,1);
   const bad=await fetch(base+`/api/projects/${p.id}`,{method:'PUT',headers:{'Content-Type':'application/json','X-Workspace-Token':token},body:JSON.stringify({revision:1,brief:'stale'})});assert.equal(bad.status,409);
   const csrf=await fetch(base+'/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"name":"bad"}'});assert.equal(csrf.status,403);
   const settings=state.settings, endpoint=`http://127.0.0.1:${fixture.address().port}`;
@@ -61,6 +62,12 @@ test('真实 HTTP 工作流、版本冲突、Comfy 协议、媒体导入和 FFmp
   assert.deepEqual(textRequests.map(r=>r.model),['fixture-model','fixture-model','fixture-model']);
   assert.deepEqual(textRequests.map(r=>r.temperature),[0.7,0.7,0.2]);
   assert.match(textRequests[1].messages[1].content,/绿色夹克/);assert.match(textRequests[1].messages[1].content,/听见未来/);
+  const outlined=state.jobs.find(j=>j.kind==='outline'&&j.applied);assert.ok(outlined);
+  const rawState=JSON.parse(await readFile(path.join(folder,'data','workspace.json'),'utf8'));
+  const rawJob=rawState.jobs.find(j=>j.id===outlined.id);
+  assert.ok(rawJob.snapshot.characters.some(c=>c.id==='fixture-char'),'snapshot must carry shared library');
+  assert.equal(rawJob.snapshot.name,'Integration fixture');
+  assert.ok(!('id' in rawJob.snapshot),'snapshot must be minimal, not a full project clone');
   const generated=await wait((await call('/api/jobs','POST',{projectId:p.id,kind:'video',scene:0,shot:0})).id);
   assert.equal(generated.status,'succeeded',generated.error);assert.equal(receivedGraph['2'].inputs.steps,8);assert.equal(receivedGraph['1'].inputs.text,'a quiet tape repair shop at night\n场景：磁带店 / 夜');
   p=await latest();const scriptVersion=p.scriptVersion;
@@ -73,6 +80,12 @@ test('真实 HTTP 工作流、版本冲突、Comfy 协议、媒体导入和 FFmp
   assert.equal(receivedGraph['2'].inputs.steps,9);assert.equal(receivedGraph['1'].inputs.text,'revised rainy shop\n场景：磁带店 / 夜');
   p=await latest();p=await call(`/api/projects/${p.id}/shots/0/0/select`,'POST',{revision:p.revision,assetId:generated.assetId});assert.equal(p.selectedShots['0-0'],generated.assetId);
   const upload=await fetch(base+`/api/assets?projectId=${p.id}&name=silent`,{method:'POST',headers:{'X-Workspace-Token':token},body:await readFile(silent)});assert.equal(upload.status,201);const uploaded=await upload.json();assert.equal(uploaded.audio,false);
+  const jpeg1x1=Buffer.from('/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q==','base64');const pngUpload=await fetch(base+`/api/assets?projectId=${p.id}&kind=image&characterId=fixture-char&name=probe.png`,{method:'POST',headers:{'X-Workspace-Token':token},body:jpeg1x1});assert.equal(pngUpload.status,201);
+  const image=await pngUpload.json();assert.equal(image.kind,'image');assert.equal(image.extension,'jpg');
+  const rawAssets=JSON.parse(await readFile(path.join(folder,'data','workspace.json'),'utf8')).assets;
+  const storedImage=rawAssets.find(a=>a.id===image.id);
+  assert.match(storedImage.file,/\d+\.jpg$/,'on-disk extension must follow detected format');
+  assert.ok((await readFile(storedImage.file)).subarray(0,2).equals(Buffer.from([255,216])),'content must stay untouched');
   p=await latest();p=await call(`/api/projects/${p.id}`,'PUT',{revision:p.revision,timeline:[{assetId:generated.assetId,start:0.25,end:1.25,volume:0.5},{assetId:uploaded.id,start:0,end:0.75,volume:1}]});
   const rendered=await wait((await call('/api/jobs','POST',{projectId:p.id,kind:'export'})).id);assert.equal(rendered.status,'succeeded',rendered.error);
   const output=path.join(folder,'verified-export.mp4');await writeFile(output,Buffer.from(await(await fetch(base+`/media/${rendered.assetId}`)).arrayBuffer()));

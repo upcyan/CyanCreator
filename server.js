@@ -40,7 +40,8 @@ const vault=new SecretVault(DATA);await vault.load();
 // Rebase managed media after the workspace folder is renamed.
 for (const asset of state.assets) {
   if (/^[\w-]+$/.test(asset.id) && !existsSync(asset.file)) {
-    const moved = path.join(MEDIA, `${asset.id}.${asset.kind==='audio'?'wav':asset.kind==='image'?'png':'mp4'}`);
+    const fallback = asset.kind==='audio'?'wav':asset.kind==='image'?'png':'mp4';
+    const moved = path.join(MEDIA, `${asset.id}.${asset.extension || fallback}`);
     if (existsSync(moved)) asset.file = moved;
   }
 }
@@ -60,7 +61,9 @@ for (const job of state.jobs) if (['queued', 'running'].includes(job.status)) {j
 persist();
 const projectById = id => {const p = state.projects.find(p => p.id === id); requireValue(p, '项目不存在', 404); return p;};
 const chapterDirectory=p=>p.episodes.map(e=>({id:e.id,title:e.title,chapters:e.chapters.map(c=>({id:c.id,title:c.title}))}));
-const taskSnapshot=p=>structuredClone({...p,episodes:chapterDirectory(p),history:[]});
+// Minimal snapshot: queued jobs only consume writing context, timeline and audio plans.
+// Cloning the full project here used to multiply workspace.json by every queued task.
+const taskSnapshot=p=>structuredClone({name:p.name,activeChapterId:p.activeChapterId,brief:p.brief,bible:p.bible,characters:p.characters,worldbook:p.worldbook,outline:p.outline,script:p.script,review:p.review,timeline:p.timeline||[],audioTracks:p.audioTracks||[],episodes:chapterDirectory(p)});
 const publicState = () => ({...state,projects:state.projects.map(p=>({...p,episodes:chapterDirectory(p)})),storageError:workspaceStore.error,cloudTemplates,secrets:secretStatus(), videoCapabilities:videoCapabilities(state.settings.video), catalog: publicCatalog(), runtimes: deployments.runtime.status(), deployments: state.deployments.map(({config,...j})=>j), assets: state.assets.map(({file, ...a}) => a), jobs: state.jobs.map(({snapshot, config, runtimeConfig, ...j}) => j)});
 function revise(p) {p.revision++; p.updatedAt = new Date().toISOString();}
 function applyDocument(p, stage, result) {
@@ -78,14 +81,17 @@ async function body(req) {
 async function json(res, data, code = 200) {if(!['GET','HEAD'].includes(res.req.method)){try{await workspaceStore.flush();}catch(e){data={error:e.message};code=503;}}res.writeHead(code, {'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store'}); res.end(JSON.stringify(data));}
 async function saveAsset(stream, name, projectId, signal, kind) {
   const id = randomUUID(), file = path.join(MEDIA, `${id}.${kind==='audio'?'wav':kind==='image'?'png':'mp4'}`);
-  let bytes = 0;
-  const limiter = new Transform({transform(chunk, _, cb) {bytes += chunk.length; cb(bytes > (kind==='image'?20:512) * 1024 * 1024 ? new Error('素材超过 512MB') : null, chunk);}});
+  let bytes = 0, stored = file;
+  const limit = kind==='image'?20:512;
+  const limiter = new Transform({transform(chunk, _, cb) {bytes += chunk.length; cb(bytes > limit * 1024 * 1024 ? new Error(`素材超过 ${limit}MB`) : null, chunk);}});
   try {
     await pipeline(stream, limiter, createWriteStream(file), {signal});
     const metadata = await (kind==='audio'?inspectAudio(file,signal):kind==='image'?inspectImage(file,signal):inspect(file,signal));
-    const asset = {id, name: String(name).slice(0, 120), projectId, file, ...metadata, createdAt: new Date().toISOString(), url: `/media/${id}`};
+    // Keep the on-disk extension aligned with the detected container (mp3, jpg, webm, m4a...).
+    if (metadata.extension && !file.endsWith('.'+metadata.extension)) {stored = path.join(MEDIA, `${id}.${metadata.extension}`); renameSync(file, stored);}
+    const asset = {id, name: String(name).slice(0, 120), projectId, file: stored, ...metadata, createdAt: new Date().toISOString(), url: `/media/${id}`};
     state.assets.push(asset); persist(); return asset;
-  } catch (e) {await unlink(file).catch(() => {}); throw e;}
+  } catch (e) {await unlink(stored).catch(() => {}); throw e;}
 }
 let pumping = false;
 function videoJob(p,b){
@@ -309,7 +315,7 @@ export const server = http.createServer(async (req, res) => {
     if (jm && method === 'POST') {
       const job = state.jobs.find(j => j.id === jm[1]); requireValue(job, '任务不存在', 404);
       if (jm[2] === 'cancel') {
-        requireValue(['queued', 'running'].includes(job.status), '任务已结束');
+        requireValue(['queued', 'running'].includes(job.status), '任务已结束，无法取消');
         if (job.status === 'queued') job.status = 'cancelled'; else {job.progress={phase:'cancelling',message:'正在取消本地执行 / 断开远端等待'};controllers.get(job.id)?.abort();}
       } else {
         const b = await body(req), p = projectById(job.projectId);
