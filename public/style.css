@@ -7,4 +7,5 @@
 .asset-thumb video,.asset-thumb img{max-width:100%;max-height:100%;width:100%;object-fit:contain}
 .asset-thumb audio{width:100%}
 button.danger{color:#ff6b6b;border-color:rgba(255,107,107,.4)}
+button.small.danger{color:#ff6b6b}
 button.danger:hover{background:rgba(255,107,107,.12)}

@@ -98,4 +98,43 @@ test('真实 HTTP 工作流、版本冲突、Comfy 协议、媒体导入和 FFmp
   settings.text.profiles[0].baseUrl='http://127.0.0.1:1/v1';await call('/api/settings','PUT',settings);
   const failed=await wait((await call('/api/jobs','POST',{projectId:p.id,kind:'outline'})).id);assert.equal(failed.status,'failed');assert.ok(failed.error);
   console.log('Verified export:',output,metadata);
+
+  // --- 项目管理：重命名 / 复制 / 导出 / 导入 / 删除 ---
+  p=await latest();
+  p=await call(`/api/projects/${p.id}`,'POST',{action:'rename',name:'管理测试 · 重命名'});assert.equal(p.name,'管理测试 · 重命名');
+  const badRename=await fetch(base+`/api/projects/${p.id}`,{method:'POST',headers:{'Content-Type':'application/json','X-Workspace-Token':token},body:JSON.stringify({action:'rename',name:'  '})});assert.equal(badRename.status,400);
+  const copy=await call(`/api/projects/${p.id}`,'POST',{action:'duplicate'});assert.equal(copy.name,'管理测试 · 重命名 · 副本');
+  const copyState=await call('/api/state');const copiedProject=copyState.projects.find(x=>x.id===copy.id);
+  assert.ok(copiedProject.outline&&copiedProject.outline.logline==='最后一盘磁带','duplicate must carry outline');
+  assert.equal(copiedProject.selectedShots&&Object.keys(copiedProject.selectedShots).length,0,'duplicate must reset selected shots');
+  assert.notEqual(copiedProject.scriptVersion,p.scriptVersion);
+  const manifest=await call(`/api/projects/${p.id}`,'POST',{action:'export'});
+  assert.equal(manifest.name,'管理测试 · 重命名');assert.ok(Array.isArray(manifest.files));
+  const imageFile=manifest.files.find(f=>f.id===image.id);assert.ok(imageFile&&imageFile.bytes&&imageFile.bytes.data&&imageFile.bytes.data.length>0,'export must embed asset bytes');
+  const textOnly=structuredClone(manifest);for(const f of textOnly.files)f.bytes=null;
+  textOnly.name='仅文本副本';
+  const importedText=await call('/api/projects/import','POST',{project:textOnly});assert.equal(importedText.imported,0);assert.equal(importedText.missing,manifest.files.length);
+  const importedFull=await call('/api/projects/import','POST',{project:manifest});
+  assert.equal(importedFull.imported,manifest.files.length);assert.equal(importedFull.missing,0);
+  const reimported=importedFull.project;assert.notEqual(reimported.id,p.id);assert.equal(reimported.name,'管理测试 · 重命名');
+  const afterImport=await call('/api/state');
+  const reimportedImage=afterImport.assets.find(a=>a.projectId===reimported.id&&a.kind==='image');
+  assert.ok(reimportedImage,'reimport must recreate asset records');assert.notEqual(reimportedImage.id,image.id,'reimported assets must get fresh ids');
+  const mediaCheck=await fetch(base+`/media/${reimportedImage.id}`);assert.equal(mediaCheck.status,200,'reimported bytes must serve under /media');
+  const badImport=await call('/api/projects/import','POST',{project:{name:'x'}}).catch(e=>e);assert.ok(badImport instanceof Error,'invalid manifest must fail');
+  const stateBeforeDelete=await call('/api/state');
+  assert.ok(stateBeforeDelete.projects.some(x=>x.id===p.id));
+  // 副本与导入件引用了原项目的素材：删除原项目应被引用防护拦截
+  const blocked=await fetch(base+`/api/projects/${p.id}`,{method:'DELETE',headers:{'X-Workspace-Token':token}});
+  assert.equal(blocked.status,400,'deleting a project whose assets are referenced elsewhere must 400');
+  await call(`/api/projects/${copy.id}`,'DELETE');
+  await call(`/api/projects/${importedText.project.id}`,'DELETE');
+  await call(`/api/projects/${importedFull.project.id}`,'DELETE');
+  const del=await call(`/api/projects/${p.id}`,'DELETE');assert.equal(del.ok,true);assert.ok(del.removed>=1);
+  const stateAfterDelete=await call('/api/state');
+  assert.ok(!stateAfterDelete.projects.some(x=>x.id===p.id),'project must be gone');
+  assert.ok(!stateAfterDelete.assets.some(a=>a.projectId===p.id),'project assets must be gone');
+  const mediaGone=await fetch(base+`/media/${image.id}`);assert.equal(mediaGone.status,404,'deleted asset file must 404');
+  const ghostDelete=await fetch(base+`/api/projects/${p.id}`,{method:'DELETE',headers:{'X-Workspace-Token':token}});assert.equal(ghostDelete.status,404);
+  console.log('Project management verified: rename/duplicate/export/import/delete');
 });

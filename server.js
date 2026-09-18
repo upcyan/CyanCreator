@@ -253,6 +253,57 @@ export const server = http.createServer(async (req, res) => {
       }
       return json(res, await probe(config, kind));
     }
+    if (u.pathname === '/api/projects/import' && method === 'POST') {
+      const b = await body(req); const m = b && b.project;
+      requireValue(m && typeof m === 'object' && !Array.isArray(m), '无效的工程档案');
+      requireValue(typeof m.name === 'string' && m.name.trim() && m.name.length <= 100, '工程档案缺少有效的项目名称');
+      requireValue(Array.isArray(m.files) && m.files.length <= 2000, '工程档案素材清单无效');
+      requireValue(state.projects.length < 100, '项目数量已达上限（100）');
+      const entries = new Map();
+      const isBytes = v => Buffer.isBuffer(v) || (v && v.type === 'Buffer' && Array.isArray(v.data));
+      for (const f of m.files) {
+        requireValue(f && typeof f.id === 'string' && /^[\w-]{1,100}$/.test(f.id) && !entries.has(f.id), '素材 ID 无效或重复：' + (f && f.id));
+        requireValue(f.bytes === null || f.bytes === undefined || isBytes(f.bytes), '素材内容无效：' + f.id);
+        entries.set(f.id, f);
+      }
+      const p = structuredClone(m);
+      p.id = randomUUID(); p.scriptVersion = randomUUID(); p.revision = 1; p.updatedAt = new Date().toISOString();
+      p.history = Array.isArray(p.history) ? p.history.slice(0, 50) : [];
+      p.episodes = Array.isArray(p.episodes) ? p.episodes : [];
+      delete p.files;
+      initCreation(p);
+      // 素材 ID 全工作台唯一：导入时全部换新 ID，并重映射项目内引用，避免与现有项目冲突。
+      const idMap = new Map([...entries.keys()].map(id => [id, randomUUID()]));
+      const remap = id => idMap.get(id) || id;
+      p.selectedShots = {};
+      for (const chapter of p.episodes.flatMap(e => e.chapters || [])) if (chapter.selectedShots) chapter.selectedShots = {};
+      if (Array.isArray(p.timeline)) p.timeline = p.timeline.map(c => ({...c, assetId: remap(c.assetId)}));
+      if (Array.isArray(p.audioTracks)) p.audioTracks = p.audioTracks.map(t => ({...t, assetId: remap(t.assetId)}));
+      if (p.characterReferences && typeof p.characterReferences === 'object') p.characterReferences = Object.fromEntries(Object.entries(p.characterReferences).map(([k, v]) => [k, remap(v)]));
+      const imported = [];
+      for (const [id, f] of entries) {
+        if (f.bytes === null || f.bytes === undefined) continue;
+        const content = Buffer.isBuffer(f.bytes) ? f.bytes : Buffer.from(f.bytes.data);
+        const ext = (typeof f.name === 'string' && f.name.includes('.')) ? f.name.split('.').pop().toLowerCase().replace(/[\w-]/g, '') : '';
+        const safeExt = ['mp4', 'webm', 'mov', 'wav', 'mp3', 'm4a', 'png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext) ? ext : 'bin';
+        const newId = idMap.get(id);
+        const file = path.join(MEDIA, `${newId}.${safeExt}`);
+        writeFileSync(file, content);
+        const a = {id: newId, name: String(f.name ?? '素材').slice(0, 120), kind: ['video', 'audio', 'image'].includes(f.kind) ? f.kind : 'video', projectId: p.id, file, createdAt: f.createdAt || new Date().toISOString(), url: `/media/${newId}`};
+        if (f.scriptVersion) a.scriptVersion = f.scriptVersion;
+        if (f.scene !== null && f.scene !== undefined) a.scene = f.scene;
+        if (f.shot !== null && f.shot !== undefined) a.shot = f.shot;
+        if (f.characterId) a.characterId = f.characterId;
+        if (f.chapterId) a.chapterId = f.chapterId;
+        if (f.imageMode) a.imageMode = f.imageMode;
+        if (f.jobId) a.jobId = f.jobId;
+        if (f.duration !== null && f.duration !== undefined) a.duration = f.duration;
+        if (f.audio !== null && f.audio !== undefined) a.audio = f.audio;
+        state.assets.push(a); imported.push(id);
+      }
+      state.projects.unshift(p); persist();
+      return json(res, {project: p, imported: imported.length, missing: entries.size - imported.length}, 201);
+    }
     if (u.pathname === '/api/projects' && method === 'POST') {
       const b = await body(req); requireValue(typeof b.name === 'string' && b.name.trim(), '请填写项目名称');
       const p = {id: randomUUID(),scriptVersion:randomUUID(), name: b.name.slice(0, 100), brief: '', bible: '', outline: null, script: null, review: null, stale: {}, timeline: [], history: [], revision: 1, updatedAt: new Date().toISOString()};
@@ -281,6 +332,32 @@ export const server = http.createServer(async (req, res) => {
       requireValue(state.jobs.filter(j=>['queued','running'].includes(j.status)).length+b.shots.length<=20,'队列容量不足，请减少批量镜头');
       const jobs=b.shots.map(s=>({id:randomUUID(),projectId:p.id,kind:'video',status:'queued',baseRevision:p.revision,snapshot:taskSnapshot(p),createdAt:new Date().toISOString(),...videoJob(p,s)}));
       state.jobs.unshift(...jobs.reverse());persist();json(res,{ids:jobs.map(j=>j.id)},202);void pump();return;
+    }
+    const manageRoute = u.pathname.match(/^\/api\/projects\/([\w-]+)$/);
+    if (manageRoute && method === 'POST') {
+      const p = projectById(manageRoute[1]), b = await body(req), action = b.action;
+      if (action === 'rename') {
+        requireValue(typeof b.name === 'string' && b.name.trim() && b.name.length <= 100, '项目名称须为 1–100 字符');
+        p.name = b.name.trim(); revise(p); persist(); return json(res, p);
+      }
+      if (action === 'duplicate') {
+        requireValue(state.projects.length < 100, '项目数量已达上限（100）');
+        requireValue(![...state.jobs, ...state.deployments].some(j => ['queued', 'running'].includes(j.status) && j.projectId === p.id), '请等待该项目任务结束后再复制');
+        const copy = structuredClone(p); copy.id = randomUUID(); copy.scriptVersion = randomUUID(); copy.selectedShots = {};
+        copy.name = (p.name + ' · 副本').slice(0, 100); copy.revision = 1; copy.updatedAt = new Date().toISOString();
+        initCreation(copy); state.projects.unshift(copy); persist(); return json(res, copy, 201);
+      }
+      if (action === 'export') {
+        requireValue(![...state.jobs, ...state.deployments].some(j => ['queued', 'running'].includes(j.status) && j.projectId === p.id), '请等待该项目任务结束后再导出');
+        stashChapter(p);
+        const manifest = structuredClone(p); manifest.files = [];
+        for (const a of state.assets.filter(a => a.projectId === p.id)) {
+          let bytes = null; try {bytes = readFileSync(a.file);} catch {}
+          manifest.files.push({id: a.id, name: a.name, kind: a.kind, projectId: a.projectId, scriptVersion: a.scriptVersion ?? null, scene: a.scene ?? null, shot: a.shot ?? null, characterId: a.characterId ?? null, chapterId: a.chapterId ?? null, imageMode: a.imageMode ?? null, jobId: a.jobId ?? null, duration: a.duration ?? null, audio: a.audio ?? null, createdAt: a.createdAt, bytes});
+        }
+        return json(res, manifest);
+      }
+      requireValue(false, '未知的操作');
     }
     const match = u.pathname.match(/^\/api\/projects\/([\w-]+)$/);
     if (match && method === 'PUT') {
@@ -325,6 +402,26 @@ export const server = http.createServer(async (req, res) => {
       state.assets = state.assets.filter(x => x.id !== a.id); persist();
       await unlink(a.file).catch(() => {});
       return json(res, {ok: true});
+    }
+    if (manageRoute && method === 'DELETE') {
+      const p = projectById(manageRoute[1]);
+      requireValue(![...state.jobs, ...state.deployments].some(j => ['queued', 'running'].includes(j.status) && j.projectId === p.id), '请等待该项目任务结束后再删除');
+      const linked = state.assets.filter(a => a.projectId === p.id);
+      const linkedIds = new Set(linked.map(a => a.id));
+      const shared = [];
+      for (const x of state.projects) {
+        if (x.id === p.id) continue;
+        if (x.timeline?.some(c => linkedIds.has(c.assetId))) shared.push('时间线 · ' + x.name);
+        if (x.audioTracks?.some(t => linkedIds.has(t.assetId))) shared.push('音轨 · ' + x.name);
+        if (Object.values(x.selectedShots || {}).some(id => linkedIds.has(id))) shared.push('选定镜头版本 · ' + x.name);
+        if (x.characterReferences && Object.values(x.characterReferences).some(id => linkedIds.has(id))) shared.push('角色参考图 · ' + x.name);
+      }
+      requireValue(!shared.length, '素材仍被其他项目引用，请先处理：' + shared.slice(0, 3).join('、') + (shared.length > 3 ? ' 等' : ''));
+      state.projects = state.projects.filter(x => x.id !== p.id);
+      state.assets = state.assets.filter(a => a.projectId !== p.id);
+      persist();
+      for (const a of linked) await unlink(a.file).catch(() => {});
+      return json(res, {ok: true, removed: linked.length});
     }
     if (u.pathname === '/api/jobs' && method === 'POST') {
       const b = await body(req), p = projectById(b.projectId);
