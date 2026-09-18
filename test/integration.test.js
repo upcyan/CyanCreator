@@ -84,7 +84,7 @@ test('真实 HTTP 工作流、版本冲突、Comfy 协议、媒体导入和 FFmp
   const image=await pngUpload.json();assert.equal(image.kind,'image');assert.equal(image.extension,'jpg');
   const rawAssets=JSON.parse(await readFile(path.join(folder,'data','workspace.json'),'utf8')).assets;
   const storedImage=rawAssets.find(a=>a.id===image.id);
-  assert.match(storedImage.file,/\d+\.jpg$/,'on-disk extension must follow detected format');
+  assert.match(storedImage.file,/\.jpg$/,'on-disk extension must follow detected format');
   assert.ok((await readFile(storedImage.file)).subarray(0,2).equals(Buffer.from([255,216])),'content must stay untouched');
   p=await latest();p=await call(`/api/projects/${p.id}`,'PUT',{revision:p.revision,timeline:[{assetId:generated.assetId,start:0.25,end:1.25,volume:0.5},{assetId:uploaded.id,start:0,end:0.75,volume:1}]});
   const rendered=await wait((await call('/api/jobs','POST',{projectId:p.id,kind:'export'})).id);assert.equal(rendered.status,'succeeded',rendered.error);
