@@ -17,6 +17,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {randomUUID, randomBytes} from 'node:crypto';
 import {pipeline} from 'node:stream/promises';
+import {setTimeout as delay} from 'node:timers/promises';
 import {Transform, Readable} from 'node:stream';
 import {defaults, requireValue, validateDocument, validateSettings, number} from './lib/core.js';
 import {generateText, comfyVideo, minimaxVideo, probe} from './lib/providers.js';
@@ -64,7 +65,7 @@ const projectById = id => {const p = state.projects.find(p => p.id === id); requ
 const chapterDirectory=p=>p.episodes.map(e=>({id:e.id,title:e.title,chapters:e.chapters.map(c=>({id:c.id,title:c.title}))}));
 // Minimal snapshot: queued jobs only consume writing context, timeline and audio plans.
 // Cloning the full project here used to multiply workspace.json by every queued task.
-const taskSnapshot=p=>structuredClone({name:p.name,activeChapterId:p.activeChapterId,brief:p.brief,bible:p.bible,characters:p.characters,worldbook:p.worldbook,outline:p.outline,script:p.script,review:p.review,timeline:p.timeline||[],audioTracks:p.audioTracks||[],episodes:chapterDirectory(p)});
+const taskSnapshot=p=>structuredClone({name:p.name,activeChapterId:p.activeChapterId,brief:p.brief,bible:p.bible,characters:p.characters,worldbook:p.worldbook,outline:p.outline,script:p.script,review:p.review,timeline:p.timeline||[],audioTracks:p.audioTracks||[],subtitles:p.subtitles||[],episodes:chapterDirectory(p)});
 const publicState = () => ({...state,projects:state.projects.map(p=>({...p,episodes:chapterDirectory(p)})),storageError:workspaceStore.error,cloudTemplates,secrets:secretStatus(), videoCapabilities:videoCapabilities(state.settings.video), catalog: publicCatalog(), runtimes: deployments.runtime.status(), deployments: state.deployments.map(({config,...j})=>j), assets: state.assets.map(({file, ...a}) => a), assetUsage: assetUsage(), jobs: state.jobs.map(({snapshot, config, runtimeConfig, guideHistory, ...j}) => j)});
 function assetUsage() {
   const usage = {counts: {}, bytes: {}, totalBytes: 0, perAsset: []};
@@ -111,7 +112,9 @@ function videoJob(p,b){
   requireValue(Number.isInteger(b.scene)&&Number.isInteger(b.shot),'镜头索引无效');
   const shot=p.script.scenes[b.scene]?.shots[b.shot];requireValue(shot,'镜头不存在');
   validateDirection(shot);requireValue((shot.characterIds||[]).every(id=>p.characters.some(c=>c.id===id)),'镜头引用了已移除角色，请重新关联');const config=shotConfig(state.settings.video,shot);
-  return {prompt:compileShot(shot,p,p.script.scenes[b.scene]),chapterId:p.activeChapterId,duration:shot.duration,shotLabel:`${b.scene+1}-${b.shot+1}`,scene:b.scene,shot:b.shot,scriptVersion:p.scriptVersion,config,runtimeConfig:structuredClone(state.deploymentConfig)};
+  let firstFrameAssetId;
+  if(shot.firstFrameId){const ff=state.assets.find(a=>a.id===shot.firstFrameId&&a.projectId===p.id&&a.kind==='image');requireValue(ff,'首帧图不存在或已被删除，请重新选择');requireValue(['seedance','kling','veo','minimax'].includes(config.provider),'首帧图生视频当前仅支持云端模型（Seedance / 可灵 / Veo / MiniMax）');firstFrameAssetId=ff.id;}
+  return {prompt:compileShot(shot,p,p.script.scenes[b.scene]),chapterId:p.activeChapterId,duration:shot.duration,shotLabel:`${b.scene+1}-${b.shot+1}`,scene:b.scene,shot:b.shot,scriptVersion:p.scriptVersion,config,runtimeConfig:structuredClone(state.deploymentConfig),...(firstFrameAssetId?{firstFrameAssetId}:{})};
 }
 async function pump() {
   if (pumping) return; pumping = true;
@@ -140,19 +143,22 @@ async function pump() {
           else job.note = '生成期间项目发生修改，结果已保留，未覆盖当前稿。';
         } else if (job.kind === 'video') {
           let asset;
+          let firstFrame=null;
+          if(job.firstFrameAssetId){const fa=state.assets.find(a=>a.id===job.firstFrameAssetId);requireValue(fa,'首帧图素材已被删除');const bytes=readFileSync(fa.file);requireValue(bytes.length<=10*1024*1024,'首帧图片超过 10MB，请压缩后重新导入');firstFrame={bytes,mime:fa.mime||'image/png'};}
           if(job.config.provider==='native'){
             const output=await deployments.native.generate(job.config,job.runtimeConfig,job.prompt,controller.signal,event=>{job.progress=event;persist();});
             try{asset=await saveAsset(createReadStream(output.file),`镜头 ${job.shotLabel}`,p.id,controller.signal);}finally{await output.cleanup();}
           }else{
             job.progress={phase:'remote',message:'等待远端推理结果'};persist();
-            const response = job.config.provider === 'comfy' ? await comfyVideo(job.config, job.prompt, controller.signal, remote) : ['seedance','kling','veo'].includes(job.config.provider)?await cloudVideo(job.config,job.prompt,job.duration,controller.signal,remote):await minimaxVideo(job.config, job.prompt, job.duration, controller.signal, remote);
+            const response = job.config.provider === 'comfy' ? await comfyVideo(job.config, job.prompt, controller.signal, remote) : ['seedance','kling','veo'].includes(job.config.provider)?await cloudVideo(job.config,job.prompt,job.duration,controller.signal,remote,delay,firstFrame):await minimaxVideo(job.config, job.prompt, job.duration, controller.signal, remote, firstFrame);
             asset=await saveAsset(Readable.fromWeb(response.body),`镜头 ${job.shotLabel}`,p.id,controller.signal);
           }
           Object.assign(asset,{scene:job.scene,shot:job.shot,scriptVersion:job.scriptVersion,jobId:job.id});job.assetId=asset.id;job.progress={phase:'complete'};
         } else {
           const folder = path.join(DATA, 'renders', job.id); await mkdir(folder, {recursive: true});
           const file = path.join(MEDIA, `${job.id}.mp4`);
-          const info = await render(job.snapshot.timeline, state.assets.filter(a => a.projectId === p.id), folder, file, controller.signal, job.snapshot.audioTracks||[]);
+          const preset = job.exportPreset==='1080p'?{width:1920,height:1080}:job.exportPreset==='720-vertical'?{width:720,height:1280}:job.exportPreset==='1080-vertical'?{width:1080,height:1920}:{width:1280,height:720};
+          const info = await render(job.snapshot.timeline, state.assets.filter(a => a.projectId === p.id), folder, file, controller.signal, job.snapshot.audioTracks||[], preset, job.snapshot.subtitles||[]);
           controller.signal.throwIfAborted();
           const asset = {id: job.id, file, name: `${job.snapshot.name} · 成片`, projectId: p.id, ...info, url: `/media/${job.id}`, exported: true, createdAt: new Date().toISOString()};
           state.assets.push(asset); job.assetId = asset.id;
@@ -330,7 +336,15 @@ export const server = http.createServer(async (req, res) => {
       requireValue(Array.isArray(b.shots)&&b.shots.length>0&&b.shots.length<=20,'请选择 1–20 个镜头');
       requireValue(new Set(b.shots.map(s=>`${s.scene}-${s.shot}`)).size===b.shots.length,'镜头重复');
       requireValue(state.jobs.filter(j=>['queued','running'].includes(j.status)).length+b.shots.length<=20,'队列容量不足，请减少批量镜头');
-      const jobs=b.shots.map(s=>({id:randomUUID(),projectId:p.id,kind:'video',status:'queued',baseRevision:p.revision,snapshot:taskSnapshot(p),createdAt:new Date().toISOString(),...videoJob(p,s)}));
+      const continueSeed=b.seedMode==='continue';
+      if(continueSeed)requireValue(['native','comfy'].includes(state.settings.video.provider),'Seed 延续仅支持本地模型（原生 Diffusers / ComfyUI）');
+      // 按镜头时间序推进：baseSeed + 序号，同批次内每个镜头获得稳定且递增的 seed。
+      let baseSeed=continueSeed?Number(state.settings.video.params?.seed)||0:null;
+      const jobs=b.shots.map(s=>{
+        const spec=videoJob(p,s);
+        if(continueSeed){spec.config.params.seed=(baseSeed+spec.scene*1000+spec.shot)>>>0;spec.seedContinued=true;}
+        return {id:randomUUID(),projectId:p.id,kind:'video',status:'queued',baseRevision:p.revision,snapshot:taskSnapshot(p),createdAt:new Date().toISOString(),...spec};
+      });
       state.jobs.unshift(...jobs.reverse());persist();json(res,{ids:jobs.map(j=>j.id)},202);void pump();return;
     }
     const manageRoute = u.pathname.match(/^\/api\/projects\/([\w-]+)$/);
@@ -366,11 +380,19 @@ export const server = http.createServer(async (req, res) => {
       if ('stage' in b) {requireValue(['outline', 'script', 'review'].includes(b.stage), '无效阶段'); applyDocument(p, b.stage, validateDocument(b.stage, b.value));}
       else {
         for (const key of ['name', 'brief', 'bible']) if (key in b) {requireValue(typeof b[key] === 'string' && b[key].length <= 50000, '文本长度无效'); if (b[key] !== p[key] && key !== 'name') invalidateChapters(p); p[key] = b[key];}
+        if ('exportPreset' in b) {requireValue([null, '720p', '1080p', '720-vertical', '1080-vertical'].includes(b.exportPreset), '导出档位无效'); p.exportPreset = b.exportPreset || null; revise(p);}
+        if('__firstFrame' in b){const {scene,shot,assetId}=b.__firstFrame;requireValue(Number.isInteger(scene)&&Number.isInteger(shot),'镜头索引无效');const target=p.script?.scenes[scene]?.shots[shot];requireValue(target,'镜头不存在');requireValue(typeof assetId==='string'&&assetId.length<=100,'首帧素材引用无效');requireValue(state.assets.some(a=>a.id===assetId&&a.kind==='image'),'首帧必须是图片素材');target.firstFrameId=assetId;revise(p);}
+        if('__clearFirstFrame' in b){const {scene,shot}=b.__clearFirstFrame;requireValue(Number.isInteger(scene)&&Number.isInteger(shot),'镜头索引无效');const target=p.script?.scenes[scene]?.shots[shot];requireValue(target,'镜头不存在');delete target.firstFrameId;revise(p);}
         if('characterReference' in b){const {characterId,assetId}=b.characterReference;requireValue(p.characters.some(c=>c.id===characterId),'角色不存在');requireValue(state.assets.some(a=>a.id===assetId&&a.kind==='image'&&a.projectId===p.id&&a.characterId===characterId),'图片不属于此角色');p.characterReferences??={};p.characterReferences[characterId]=assetId;}
         if('audioTracks' in b)p.audioTracks=validateTracks(b.audioTracks,state.assets.filter(a=>a.projectId===p.id));
+        if ('subtitles' in b) {
+          requireValue(Array.isArray(b.subtitles) && b.subtitles.length <= 500, '字幕条目无效（最多 500）');
+          p.subtitles = b.subtitles.map(st => {requireValue(typeof st.text === 'string' && st.text.trim() && st.text.length <= 200, '字幕文本须为 1–200 字'); return {start: number(st.start, 0, 86400, '字幕起点'), end: number(st.end, st.start + 0.1, 86400, '字幕终点'), text: st.text.trim()};});
+          revise(p);
+        }
         if ('timeline' in b) {
           requireValue(Array.isArray(b.timeline) && b.timeline.length <= 200, '时间线格式错误');
-          for (const clip of b.timeline) {const a = state.assets.find(a => a.id === clip.assetId && a.projectId === p.id); requireValue(a&&!['audio','image'].includes(a.kind), '视频素材不属于本项目'); number(clip.start, 0, a.duration, '入点'); number(clip.end, clip.start + 0.04, a.duration + 0.02, '出点'); number(clip.volume, 0, 2, '音量');}
+          for (const [i,clip] of b.timeline.entries()) {const a = state.assets.find(a => a.id === clip.assetId && a.projectId === p.id); requireValue(a&&!['audio','image'].includes(a.kind), '视频素材不属于本项目'); number(clip.start, 0, a.duration, '入点'); number(clip.end, clip.start + 0.04, a.duration + 0.02, '出点'); number(clip.volume, 0, 2, '音量'); if(clip.transition!==undefined&&clip.transition!==null&&clip.transition!==''&&clip.transition!=='fade')throw Object.assign(new Error('转场仅支持交叉溶解（fade）'),{status:400}); if(clip.transition==='fade'&&i===b.timeline.length-1)throw Object.assign(new Error('转场不能用于最后一个片段'),{status:400}); if(!clip.transition)delete clip.transition;}
           p.timeline = b.timeline;
         }
         revise(p);
@@ -430,8 +452,9 @@ export const server = http.createServer(async (req, res) => {
       if (b.kind === 'outline') requireValue(p.brief.trim(), '请先保存创作简报');
       if (b.kind === 'script') requireValue(p.outline && !p.stale.outline, '请先生成或确认最新大纲');
       if (b.kind === 'review') requireValue(p.script && !p.stale.script && !p.stale.outline, '请先完成最新剧本');
-      if (b.kind === 'export') requireValue(p.timeline.length, '请先添加时间线片段');
+      if (b.kind === 'export') {requireValue(p.timeline.length, '请先添加时间线片段'); requireValue([undefined,'720p','1080p','720-vertical','1080-vertical'].includes(b.preset), '导出档位无效');}
       const job = {id: randomUUID(), projectId: p.id, chapterId:p.activeChapterId, kind: b.kind, status: 'queued', baseRevision: p.revision, snapshot: taskSnapshot(p), createdAt: new Date().toISOString()};
+      if (b.kind === 'export' && b.preset) job.exportPreset = b.preset;
       if (['outline', 'script', 'review'].includes(b.kind)) job.config = structuredClone(resolveTextConfig(state.settings.text, b.kind));
       if(b.kind==='speech-deploy'){requireValue(!state.jobs.some(j=>j.kind==='speech-deploy'&&['queued','running'].includes(j.status)),'语音部署已排队');job.runtimeConfig=structuredClone(state.deploymentConfig);}
       if(b.kind==='speech'){requireValue(typeof b.text==='string'&&b.text.trim()&&b.text.length<=10000,'配音文字须为 1–10000 字符');job.text=b.text;job.characterId=b.characterId||'';requireValue(!job.characterId||p.characters.some(c=>c.id===job.characterId),'角色不存在');job.config=structuredClone(state.settings.speech);if(b.voice){requireValue(job.config.provider!=='piper','本地 Piper 当前使用已部署中文音色');job.config.voice=b.voice;}validateSpeech(job.config);}

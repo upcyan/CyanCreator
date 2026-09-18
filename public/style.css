@@ -8,4 +8,5 @@
 .asset-thumb audio{width:100%}
 button.danger{color:#ff6b6b;border-color:rgba(255,107,107,.4)}
 button.small.danger{color:#ff6b6b}
+.transition-toggle{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}.transition-toggle input{width:auto}
 button.danger:hover{background:rgba(255,107,107,.12)}

@@ -137,4 +137,64 @@ test('真实 HTTP 工作流、版本冲突、Comfy 协议、媒体导入和 FFmp
   const mediaGone=await fetch(base+`/media/${image.id}`);assert.equal(mediaGone.status,404,'deleted asset file must 404');
   const ghostDelete=await fetch(base+`/api/projects/${p.id}`,{method:'DELETE',headers:{'X-Workspace-Token':token}});assert.equal(ghostDelete.status,404);
   console.log('Project management verified: rename/duplicate/export/import/delete');
+
+  // --- 图生视频首帧：引用校验 + 保存通道 ---
+  p=await latest();
+  // 新建一个项目做首帧/转场/字幕/档位验证
+  const proj=await call('/api/projects','POST',{name:'流程缺口验证'});
+  // 建角色（图片上传要求本项目角色）+ 导入首帧图片 + 造最小剧本
+  let q=await call(`/api/projects/${proj.id}/draft`,'POST',{revision:(await latest()).revision,brief:'',bible:'',characters:[{name:'主角',appearance:'黑色外套',personality:'冷静',motivation:'',relationships:'',voice:'',notes:''}],worldbook:[]});
+  q=await latest();
+  const ffUpload=await fetch(base+`/api/assets?projectId=${proj.id}&kind=image&characterId=${q.characters[0].id}&name=first-frame.png`,{method:'POST',headers:{'X-Workspace-Token':token},body:jpeg1x1});assert.equal(ffUpload.status,201);
+  const ffAsset=await ffUpload.json();
+  const scriptDoc={scenes:[{title:'场景一',action:'夜色中的店铺',dialogue:'',shots:[{prompt:'a quiet tape shop at night',duration:5}]}]};
+  q=await call(`/api/projects/${proj.id}`,'PUT',{revision:q.revision,stage:'script',value:scriptDoc});
+  q=await latest();
+  assert.ok(q.script.scenes[0].shots[0].prompt);
+  // 设置首帧 → 保存成功
+  q=await call(`/api/projects/${proj.id}`,'PUT',{revision:q.revision,__firstFrame:{scene:0,shot:0,assetId:ffAsset.id}});
+  q=await latest();assert.equal(q.script.scenes[0].shots[0].firstFrameId,ffAsset.id,'first frame id must persist');
+  // 无效首帧引用被拒
+  const badFF=await fetch(base+`/api/projects/${proj.id}`,{method:'PUT',headers:{'Content-Type':'application/json','X-Workspace-Token':token},body:JSON.stringify({revision:q.revision,__firstFrame:{scene:0,shot:0,assetId:'no-such-image'}})});assert.equal(badFF.status,400);
+  // 提交云端 i2v 任务：本地 provider 应拒绝首帧（当前 settings.video 是 comfy fixture）
+  const badProvider=await call('/api/jobs','POST',{projectId:proj.id,kind:'video',scene:0,shot:0}).catch(e=>e);
+  assert.ok(badProvider instanceof Error,'first-frame on non-cloud provider must fail');
+  // 清除首帧后可正常提交（fixture comfy 后端 + fixture 工作流）
+  q=await latest();q=await call(`/api/projects/${proj.id}`,'PUT',{revision:q.revision,__clearFirstFrame:{scene:0,shot:0}});
+  await call('/api/jobs','POST',{projectId:proj.id,kind:'video',scene:0,shot:0});
+  console.log('First-frame reference validation verified');
+
+  // --- 转场 + 字幕 + 导出档位 ---
+  // 需要视频素材：复用前面生成的 generated.assetId？已删除。生成一个新镜头视频。
+  q=await latest();
+  const vid=await wait((await call('/api/jobs','POST',{projectId:proj.id,kind:'video',scene:0,shot:0})).id);assert.equal(vid.status,'succeeded',vid.error);
+  q=await latest();const vidAsset=state.assets.find(a=>a.id===vid.assetId);
+  // 时间线：两个片段 + fade；非法转场应 400
+  const badTl=await call(`/api/projects/${proj.id}`,'PUT',{revision:q.revision,timeline:[{assetId:vidAsset.id,start:0,end:1,volume:1,transition:'wipe'}]}).catch(e=>e);assert.ok(badTl instanceof Error,'unknown transition must fail');
+  q=await latest();
+  await call(`/api/projects/${proj.id}`,'PUT',{revision:q.revision,timeline:[{assetId:vidAsset.id,start:0,end:1,volume:1,transition:'fade'},{assetId:vidAsset.id,start:0.5,end:1.5,volume:1}]});
+  // 字幕：非法文本被拒；合法保存
+  const badSub=await call(`/api/projects/${proj.id}`,'PUT',{revision:(await latest()).revision,subtitles:[{start:0,end:1,text:''}]}).catch(e=>e);assert.ok(badSub instanceof Error,'empty subtitle must fail');
+  q=await latest();
+  await call(`/api/projects/${proj.id}`,'PUT',{revision:q.revision,subtitles:[{start:0,end:0.8,text:'夜色中的一盘磁带'},{start:0.9,end:1.6,text:'故事从这里开始'}]});
+  // 1080p 竖屏导出（含转场 + 字幕 + 音轨混流链路全走 filter_complex）
+  q=await latest();
+  const renderedV=await wait((await call('/api/jobs','POST',{projectId:proj.id,kind:'export',preset:'1080-vertical'})).id);
+  assert.equal(renderedV.status,'succeeded',renderedV.error);
+  const vOut=path.join(folder,'verified-export-v.mp4');await writeFile(vOut,Buffer.from(await(await fetch(base+`/media/${renderedV.assetId}`)).arrayBuffer()));
+  const vp=await inspect(vOut);
+  assert.equal(vp.width,1080);assert.equal(vp.height,1920);
+  console.log('Transitions, subtitles and export presets verified');
+
+  // --- Seed 延续批量：本地后端（comfy/native）允许，且 seed 按镜头序注入 ---
+  settings.video={...settings.video,params:{steps:8,seed:42},workflow:{...settings.video.workflow,'2':{class_type:'Sampler',inputs:{steps:20,seed:0}}},bindings:{...settings.video.bindings,seed:{node:'2',input:'seed'}}};await call('/api/settings','PUT',settings);
+  const jobsBefore=(await call('/api/state')).jobs.length;
+  await call('/api/video/batch','POST',{projectId:proj.id,revision:(await latest()).revision,shots:[{scene:0,shot:0}],seedMode:'continue'});
+  const jobsNow=(await call('/api/state')).jobs;
+  assert.equal(jobsNow.length,jobsBefore+1,'seed-continue batch must enqueue');
+  const seededJob=jobsNow[0];
+  assert.ok(seededJob,'video job exists');
+  const seededDetails=await call(`/api/jobs/${seededJob.id}/details`);
+  assert.equal(seededDetails.config.params.seed,42,'continued seed must be baseSeed+scene*1000+shot');
+  console.log('Seed-continue verified');
 });
