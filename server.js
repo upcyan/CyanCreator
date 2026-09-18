@@ -64,7 +64,18 @@ const chapterDirectory=p=>p.episodes.map(e=>({id:e.id,title:e.title,chapters:e.c
 // Minimal snapshot: queued jobs only consume writing context, timeline and audio plans.
 // Cloning the full project here used to multiply workspace.json by every queued task.
 const taskSnapshot=p=>structuredClone({name:p.name,activeChapterId:p.activeChapterId,brief:p.brief,bible:p.bible,characters:p.characters,worldbook:p.worldbook,outline:p.outline,script:p.script,review:p.review,timeline:p.timeline||[],audioTracks:p.audioTracks||[],episodes:chapterDirectory(p)});
-const publicState = () => ({...state,projects:state.projects.map(p=>({...p,episodes:chapterDirectory(p)})),storageError:workspaceStore.error,cloudTemplates,secrets:secretStatus(), videoCapabilities:videoCapabilities(state.settings.video), catalog: publicCatalog(), runtimes: deployments.runtime.status(), deployments: state.deployments.map(({config,...j})=>j), assets: state.assets.map(({file, ...a}) => a), jobs: state.jobs.map(({snapshot, config, runtimeConfig, ...j}) => j)});
+const publicState = () => ({...state,projects:state.projects.map(p=>({...p,episodes:chapterDirectory(p)})),storageError:workspaceStore.error,cloudTemplates,secrets:secretStatus(), videoCapabilities:videoCapabilities(state.settings.video), catalog: publicCatalog(), runtimes: deployments.runtime.status(), deployments: state.deployments.map(({config,...j})=>j), assets: state.assets.map(({file, ...a}) => a), assetUsage: assetUsage(), jobs: state.jobs.map(({snapshot, config, runtimeConfig, ...j}) => j)});
+function assetUsage() {
+  const usage = {counts: {}, bytes: {}, totalBytes: 0, perAsset: []};
+  for (const a of state.assets) {
+    let size = 0; try {size = statSync(a.file).size;} catch {}
+    usage.counts[a.kind] = (usage.counts[a.kind] || 0) + 1;
+    usage.bytes[a.kind] = (usage.bytes[a.kind] || 0) + size;
+    usage.totalBytes += size;
+    usage.perAsset.push({id: a.id, bytes: size});
+  }
+  return usage;
+}
 function revise(p) {p.revision++; p.updatedAt = new Date().toISOString();}
 function applyDocument(p, stage, result) {
   p.history.unshift({id: randomUUID(), stage, value: p[stage], revision: p.revision, at: new Date().toISOString()});
@@ -292,6 +303,27 @@ export const server = http.createServer(async (req, res) => {
       const characterId=u.searchParams.get('characterId');if(u.searchParams.get('kind')==='image')requireValue(p.characters.some(c=>c.id===characterId),'请选择本项目角色');
       const a = await saveAsset(req, u.searchParams.get('name') || '导入素材', p.id,undefined,['audio','image'].includes(u.searchParams.get('kind'))?u.searchParams.get('kind'):undefined); if(a.kind==='image'){a.characterId=characterId;persist();}const {file, ...safe} = a; return json(res, safe, 201);
     }
+    if (u.pathname === '/api/assets/usage' && method === 'GET') return json(res, assetUsage());
+    const assetRoute = u.pathname.match(/^\/api\/assets\/([\w-]+)$/);
+    if (assetRoute && method === 'PUT') {
+      const a = state.assets.find(x => x.id === assetRoute[1]); requireValue(a, '素材不存在', 404);
+      const b = await body(req); requireValue(typeof b.name === 'string' && b.name.trim() && b.name.length <= 120, '名称须为 1–120 字符');
+      a.name = b.name.trim(); persist(); const {file, ...safe} = a; return json(res, safe);
+    }
+    if (assetRoute && method === 'DELETE') {
+      const a = state.assets.find(x => x.id === assetRoute[1]); requireValue(a, '素材不存在', 404);
+      const usedIn = [];
+      for (const p of state.projects) {
+        if (p.timeline?.some(c => c.assetId === a.id)) usedIn.push('时间线 · ' + p.name);
+        if (p.audioTracks?.some(t => t.assetId === a.id)) usedIn.push('音轨 · ' + p.name);
+        if (Object.values(p.selectedShots || {}).includes(a.id)) usedIn.push('选定镜头版本 · ' + p.name);
+        if (p.characterReferences && Object.values(p.characterReferences).includes(a.id)) usedIn.push('角色参考图 · ' + p.name);
+      }
+      requireValue(!usedIn.length, '素材仍被引用（' + usedIn.slice(0, 3).join('、') + (usedIn.length > 3 ? ' 等' : '') + '），请先移除引用');
+      state.assets = state.assets.filter(x => x.id !== a.id); persist();
+      await unlink(a.file).catch(() => {});
+      return json(res, {ok: true});
+    }
     if (u.pathname === '/api/jobs' && method === 'POST') {
       const b = await body(req), p = projectById(b.projectId);
       requireValue(['outline', 'script', 'review', 'video', 'export','assist','speech','speech-deploy','character-image'].includes(b.kind), '无效任务类型');
@@ -328,7 +360,7 @@ export const server = http.createServer(async (req, res) => {
     }
     const mm = u.pathname.match(/^\/media\/([\w-]+)$/);
     if (mm && ['GET', 'HEAD'].includes(method)) {const a = state.assets.find(a => a.id === mm[1]); requireValue(a, '素材不存在', 404); return serveFile(req, res, a.file, a.mime || 'video/mp4');}
-    const files = {'/video-workbench.js':['video-workbench.js','text/javascript; charset=utf-8'],'/native-settings.js':['native-settings.js','text/javascript; charset=utf-8'],'/model-hub.js':['model-hub.js','text/javascript; charset=utf-8'], '/text-models.js': ['text-models.js', 'text/javascript; charset=utf-8'], '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8']};
+    const files = {'/video-workbench.js':['video-workbench.js','text/javascript; charset=utf-8'],'/native-settings.js':['native-settings.js','text/javascript; charset=utf-8'],'/model-hub.js':['model-hub.js','text/javascript; charset=utf-8'], '/text-models.js': ['text-models.js', 'text/javascript; charset=utf-8'], '/asset-library.js':['asset-library.js','text/javascript; charset=utf-8'], '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8']};
     if (files[u.pathname] && ['GET', 'HEAD'].includes(method)) {res.setHeader('Cache-Control','no-store');return serveFile(req, res, path.join(ROOT, 'public', files[u.pathname][0]), files[u.pathname][1]);}
     json(res, {error: '接口不存在'}, 404);
   } catch (e) {if (!res.headersSent) json(res, {error: safeError(e)}, e.status || 400); else res.destroy();}
