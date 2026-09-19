@@ -101,3 +101,21 @@ button.danger:hover{background:rgba(255,107,107,.12)}
 .stage-model .hint{margin:0}
 
 .heading-actions{display:flex;align-items:center;gap:12px}
+
+.model-tag{display:inline-block;padding:0 7px;border-radius:9px;font-size:10.5px;line-height:17px;vertical-align:1px;margin-left:6px}
+.model-tag.local{background:#24371f;color:#9fd18a;border:1px solid #3f5c39}
+.model-tag.free{background:#37311a;color:#e0c479;border:1px solid #5c5433}
+
+.mm-apply{display:flex;flex-direction:column;align-items:center;gap:5px;flex:none}
+.mm-apply button{white-space:nowrap}
+.mm-name{font-size:11px;color:var(--muted);white-space:nowrap}
+
+.secret-toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 0}
+.secret-toolbar input{width:220px}
+.secret-toolbar select{width:auto}
+.secret-row{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line)}
+.secret-row .secret-name{font-family:Consolas,monospace;font-size:12.5px}
+.secret-row button{margin-left:auto}
+.model-tag.plain{background:#2a2f2c;color:var(--muted);border:1px solid var(--line)}
+
+.secret-refs{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:260px}
