@@ -5,3 +5,7 @@ data/
 .env
 *.log
 test-output/
+
+.openclaw-tmp-ui/
+.openclaw-smoke/
+.openclaw-tmp-appdata/
