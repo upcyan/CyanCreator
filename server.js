@@ -7,7 +7,9 @@ import http from 'node:http';
 import {initCreation,stashChapter,invalidateChapters,mutateStructure,importDocument,validateLibrary,shotPrompt,validateDirection} from './lib/creation.js';
 import {assistText} from './lib/assist.js';
 import {guideTurn} from './lib/guide.js';
+import {coachTurn, coachContext} from './lib/coach.js';
 import {cloudTemplates,cloudPreset,cloudVideo} from './lib/cloud-video.js';
+import {applyAgnesPreset} from './lib/agnes-preset.js';
 import {SecretVault,secretStatus,safeError} from './lib/secrets.js';
 import {spawn} from 'node:child_process';
 import {inspectUpdate} from './lib/updates.js';
@@ -66,7 +68,7 @@ const chapterDirectory=p=>p.episodes.map(e=>({id:e.id,title:e.title,chapters:e.c
 // Minimal snapshot: queued jobs only consume writing context, timeline and audio plans.
 // Cloning the full project here used to multiply workspace.json by every queued task.
 const taskSnapshot=p=>structuredClone({name:p.name,activeChapterId:p.activeChapterId,brief:p.brief,bible:p.bible,characters:p.characters,worldbook:p.worldbook,outline:p.outline,script:p.script,review:p.review,timeline:p.timeline||[],audioTracks:p.audioTracks||[],subtitles:p.subtitles||[],episodes:chapterDirectory(p)});
-const publicState = () => ({...state,projects:state.projects.map(p=>({...p,episodes:chapterDirectory(p)})),storageError:workspaceStore.error,cloudTemplates,secrets:secretStatus(), videoCapabilities:videoCapabilities(state.settings.video), catalog: publicCatalog(), runtimes: deployments.runtime.status(), deployments: state.deployments.map(({config,...j})=>j), assets: state.assets.map(({file, ...a}) => a), assetUsage: assetUsage(), jobs: state.jobs.map(({snapshot, config, runtimeConfig, guideHistory, ...j}) => j)});
+const publicState = () => ({...state,projects:state.projects.map(p=>({...p,episodes:chapterDirectory(p)})),storageError:workspaceStore.error,onboarded:!!state.onboarded,cloudTemplates,secrets:secretStatus(), videoCapabilities:videoCapabilities(state.settings.video), catalog: publicCatalog(), runtimes: deployments.runtime.status(), deployments: state.deployments.map(({config,...j})=>j), assets: state.assets.map(({file, ...a}) => a), assetUsage: assetUsage(), jobs: state.jobs.map(({snapshot, config, runtimeConfig, guideHistory, ...j}) => j)});
 function assetUsage() {
   const usage = {counts: {}, bytes: {}, totalBytes: 0, perAsset: []};
   for (const a of state.assets) {
@@ -107,13 +109,15 @@ async function saveAsset(stream, name, projectId, signal, kind) {
   } catch (e) {await unlink(stored).catch(() => {}); throw e;}
 }
 let pumping = false;
+// 引导助手历史按时间倒序存放（最新在前），coachMessages 内部会反转回对话顺序。
+const coachHistory = () => state.jobs.filter(j => j.kind === 'coach' && j.status === 'succeeded' && j.result?.reply).slice(0, 10).map(j => ({message: j.coach.message, reply: j.result.reply}));
 function videoJob(p,b){
   requireValue(p.script&&!p.stale.script&&!p.stale.outline,'剧本已过期，请先确认最新稿');
   requireValue(Number.isInteger(b.scene)&&Number.isInteger(b.shot),'镜头索引无效');
   const shot=p.script.scenes[b.scene]?.shots[b.shot];requireValue(shot,'镜头不存在');
   validateDirection(shot);requireValue((shot.characterIds||[]).every(id=>p.characters.some(c=>c.id===id)),'镜头引用了已移除角色，请重新关联');const config=shotConfig(state.settings.video,shot);
   let firstFrameAssetId;
-  if(shot.firstFrameId){const ff=state.assets.find(a=>a.id===shot.firstFrameId&&a.projectId===p.id&&a.kind==='image');requireValue(ff,'首帧图不存在或已被删除，请重新选择');requireValue(['seedance','kling','veo','minimax'].includes(config.provider),'首帧图生视频当前仅支持云端模型（Seedance / 可灵 / Veo / MiniMax）');firstFrameAssetId=ff.id;}
+  if(shot.firstFrameId){const ff=state.assets.find(a=>a.id===shot.firstFrameId&&a.projectId===p.id&&a.kind==='image');requireValue(ff,'首帧图不存在或已被删除，请重新选择');requireValue(['seedance','kling','veo','minimax','agnes'].includes(config.provider),'首帧图生视频当前仅支持云端模型（Seedance / 可灵 / Veo / MiniMax / Agnes）');firstFrameAssetId=ff.id;}
   return {prompt:compileShot(shot,p,p.script.scenes[b.scene]),chapterId:p.activeChapterId,duration:shot.duration,shotLabel:`${b.scene+1}-${b.shot+1}`,scene:b.scene,shot:b.shot,scriptVersion:p.scriptVersion,config,runtimeConfig:structuredClone(state.deploymentConfig),...(firstFrameAssetId?{firstFrameAssetId}:{})};
 }
 async function pump() {
@@ -124,7 +128,7 @@ async function pump() {
       const job = j, controller = new AbortController(); controllers.set(job.id, controller);
       job.status = 'running'; job.startedAt = new Date().toISOString(); persist();
       try {
-        const p = projectById(job.projectId);
+        const p = job.projectId ? projectById(job.projectId) : null;
         const remote = id => {job.remoteId = id; persist();};
         if(job.kind==='speech-deploy'){await speechRuntime.prepare(job.runtimeConfig,controller.signal,event=>{job.progress=event;persist();});job.note='本地语音运行环境与权重已验证，可生成配音。';}
         else if(job.kind==='speech'){
@@ -135,6 +139,7 @@ async function pump() {
         }
         else if(job.kind==='character-image'){const stream=await generateImage(job.config,job.prompt,controller.signal);const asset=await saveAsset(stream,job.characterName+(job.imageMode==='sheet'?' · 三视图':' · 立绘'),p.id,controller.signal,'image');Object.assign(asset,{characterId:job.characterId,chapterId:job.chapterId,imageMode:job.imageMode,jobId:job.id});job.assetId=asset.id;job.note='图片已入库，请预览后选为角色参考。';}
         else if(job.kind==='guide'){job.result=await guideTurn(job.snapshot,job.config,job.guide,job.guideHistory,controller.signal,event=>{job.progress=event;persist();});controller.signal.throwIfAborted();}
+        else if(job.kind==='coach'){job.result=await coachTurn(job.config,job.coach,coachContext(state,job.projectId?projectById(job.projectId):null,job.coach.page,job.coach.mode),coachHistory(),controller.signal,event=>{job.progress=event;persist();});controller.signal.throwIfAborted();}
         else if(job.kind==='assist'){job.result=await assistText(job.snapshot,job.config,job.assist,controller.signal,event=>{job.progress=event;persist();});job.note='伴写候选已保留，确认后应用。';}
         else if (['outline', 'script', 'review'].includes(job.kind)) {
           job.result = await generateText(job.kind, job.snapshot, job.config, controller.signal,event=>{job.progress=event;persist();});
@@ -150,7 +155,7 @@ async function pump() {
             try{asset=await saveAsset(createReadStream(output.file),`镜头 ${job.shotLabel}`,p.id,controller.signal);}finally{await output.cleanup();}
           }else{
             job.progress={phase:'remote',message:'等待远端推理结果'};persist();
-            const response = job.config.provider === 'comfy' ? await comfyVideo(job.config, job.prompt, controller.signal, remote) : ['seedance','kling','veo'].includes(job.config.provider)?await cloudVideo(job.config,job.prompt,job.duration,controller.signal,remote,delay,firstFrame):await minimaxVideo(job.config, job.prompt, job.duration, controller.signal, remote, firstFrame);
+            const response = job.config.provider === 'comfy' ? await comfyVideo(job.config, job.prompt, controller.signal, remote) : ['seedance','kling','veo','agnes'].includes(job.config.provider)?await cloudVideo(job.config,job.prompt,job.duration,controller.signal,remote,delay,firstFrame):await minimaxVideo(job.config, job.prompt, job.duration, controller.signal, remote, firstFrame);
             asset=await saveAsset(Readable.fromWeb(response.body),`镜头 ${job.shotLabel}`,p.id,controller.signal);
           }
           Object.assign(asset,{scene:job.scene,shot:job.shot,scriptVersion:job.scriptVersion,jobId:job.id});job.assetId=asset.id;job.progress={phase:'complete'};
@@ -215,6 +220,7 @@ export const server = http.createServer(async (req, res) => {
 
     if(u.pathname==='/api/secrets'&&method==='PUT'){const b=await body(req);await vault.set(b.name,b.value);return json(res,{ok:true,secrets:secretStatus()});}
     if(u.pathname.startsWith('/api/cloud-presets/')&&method==='GET')return json(res,cloudPreset(u.pathname.split('/').at(-1)));
+    if(u.pathname==='/api/agnes-preset'&&method==='GET')return json(res,applyAgnesPreset(state.settings));
     if(u.pathname==='/api/import-document'&&method==='POST'){const b=await body(req);return json(res,importDocument(b.stage,b.text,b.format));}
     const creation=u.pathname.match(/^\/api\/projects\/([\w-]+)\/(structure|draft)$/);
     if(creation&&method==='POST'){
@@ -229,7 +235,7 @@ export const server = http.createServer(async (req, res) => {
       }
       revise(p);Object.assign(original,p);persist();return json(res,p);
     }
-    const extraFiles={'/guide.js':'text/javascript','/character-images.js':'text/javascript','/audio-panel.js':'text/javascript','/creation-editor.js':'text/javascript','/settings-extra.js':'text/javascript','/creation.css':'text/css','/assets/cyancreator-icon.png':'image/png'};
+    const extraFiles={'/coach.js':'text/javascript','/shot-canvas.js':'text/javascript','/character-images.js':'text/javascript','/audio-panel.js':'text/javascript','/creation-editor.js':'text/javascript','/settings-extra.js':'text/javascript','/creation.css':'text/css','/assets/cyancreator-icon.png':'image/png'};
     if(extraFiles[u.pathname]&&['GET','HEAD'].includes(method)){res.setHeader('Cache-Control','no-store');return serveFile(req,res,path.join(ROOT,'public',u.pathname.slice(1)),extraFiles[u.pathname]);}
     if (u.pathname === '/api/state' && method === 'GET') return json(res, {...publicState(), token});
     if (u.pathname === '/api/h3-preset' && method === 'GET') return json(res, h3Preset());
@@ -247,6 +253,7 @@ export const server = http.createServer(async (req, res) => {
     const details = u.pathname.match(/^\/api\/jobs\/([\w-]+)\/details$/);
     if (details && method === 'GET') {const j = state.jobs.find(j => j.id === details[1]); requireValue(j, '任务不存在', 404); const {snapshot, ...safe} = j; return json(res, safe);}
     if (u.pathname === '/api/settings' && method === 'PUT') {state.settings = validateSettings(await body(req)); persist(); return json(res, {ok: true});}
+    if (u.pathname === '/api/onboarding' && method === 'POST') {const b = await body(req); requireValue(typeof b.done === 'boolean', '参数无效'); state.onboarded = b.done; persist(); return json(res, {ok: true, onboarded: state.onboarded});}
     if (u.pathname === '/api/probe' && method === 'POST') {
       const {kind, role, profileId, start} = await body(req); requireValue(['text', 'comfy','native'].includes(kind), '不支持的检查类型');
       if(kind==='native')return json(res,await deployments.native.check(state.deploymentConfig,AbortSignal.timeout(60000)));
@@ -446,7 +453,18 @@ export const server = http.createServer(async (req, res) => {
       return json(res, {ok: true, removed: linked.length});
     }
     if (u.pathname === '/api/jobs' && method === 'POST') {
-      const b = await body(req), p = projectById(b.projectId);
+      const b = await body(req);
+      if (b.kind === 'coach') {
+        requireValue(typeof b.message === 'string' && b.message.trim() && b.message.length <= 4000, '请输入 1–4000 字的助手消息');
+        requireValue(['guide', 'expert'].includes(b.mode), '助手模式无效');
+        requireValue(!state.jobs.some(j => j.kind === 'coach' && ['queued', 'running'].includes(j.status)), '请等待当前回复完成或先取消');
+        const p = b.projectId ? projectById(b.projectId) : null;
+        const job = {id: randomUUID(), kind: 'coach', status: 'queued', createdAt: new Date().toISOString(), ...(p ? {projectId: p.id, chapterId: p.activeChapterId} : {})};
+        job.coach = {message: b.message.trim(), mode: b.mode, page: String(b.page || '').slice(0, 40)};
+        job.config = structuredClone(resolveTextConfig(state.settings.text, 'outline'));
+        state.jobs.unshift(job); persist(); json(res, {id: job.id}, 202); void pump(); return;
+      }
+      const p = projectById(b.projectId);
       requireValue(['outline', 'script', 'review', 'video', 'export','assist','guide','speech','speech-deploy','character-image'].includes(b.kind), '无效任务类型');
       requireValue(state.jobs.filter(j => ['queued', 'running'].includes(j.status)).length < 20, '队列已满');
       if (b.kind === 'outline') requireValue(p.brief.trim(), '请先保存创作简报');
