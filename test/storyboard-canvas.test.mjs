@@ -31,6 +31,12 @@ assert.ok(html.includes('sb-frame first'),'首帧缩略图');
 assert.ok(html.includes('已生成'),'任务状态徽章');
 assert.ok(html.includes('data-action="creation-shot-add"'),'场景级加镜头');
 assert.ok(html.includes('sb-meta'),'场景文字折叠编辑');
+assert.ok(html.includes('data-action="sb-generate"'),'一键生成按钮');
+assert.ok(html.includes('重新生成')||html.includes('一键生成'),'按有无产物区分按钮文案');
+const running={...p,selectedShots:{}};const st2={jobs:[{projectId:'p1',scriptVersion:'v1',kind:'video',scene:0,shot:0,status:'running',id:'j9'}],assets:[]};
+const h2=mod.storyboardCanvas(running,st2,running.script);
+assert.ok(h2.includes('data-action="cancel"'),'生成中卡片应提供取消');
+assert.ok(h2.includes('生成中'),'进行中徽章');
 // 2) 结构移动函数：跨场景移动 0.1 → 场景1 末尾
 mod.moveStoryboardShot('0.1','1:end',null,p.script);
 assert.equal(p.script.scenes[1].shots.length,2);
