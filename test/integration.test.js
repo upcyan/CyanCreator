@@ -164,6 +164,36 @@ test('真实 HTTP 工作流、版本冲突、Comfy 协议、媒体导入和 FFmp
   await call('/api/jobs','POST',{projectId:proj.id,kind:'video',scene:0,shot:0});
   console.log('First-frame reference validation verified');
 
+  // --- 尾帧：校验链（无首帧拒绝 / 非法引用 / MiniMax·comfy 拒绝 / 合法保存与清除）---
+  // 导入第二张图片作尾帧
+  const lfUpload=await fetch(base+`/api/assets?projectId=${proj.id}&kind=image&characterId=${q.characters[0].id}&name=last-frame.png`,{method:'POST',headers:{'X-Workspace-Token':token},body:jpeg1x1});assert.equal(lfUpload.status,201);
+  const lfAsset=await lfUpload.json();
+  // 当前项目首帧已被 __clearFirstFrame 清除：先验证"无首帧设尾帧"被拒
+  const lfNoFirst=await fetch(base+`/api/projects/${proj.id}`,{method:'PUT',headers:{'Content-Type':'application/json','X-Workspace-Token':token},body:JSON.stringify({revision:(await latest()).revision,__lastFrame:{scene:0,shot:0,assetId:lfAsset.id}})});
+  assert.equal(lfNoFirst.status,400,'last frame requires first frame');
+  // 设首帧后：comfy 后端 + 尾帧 → 提交生成应失败（尾帧仅云端 Seedance/可灵）
+  q=await latest();q=await call(`/api/projects/${proj.id}`,'PUT',{revision:q.revision,__firstFrame:{scene:0,shot:0,assetId:ffAsset.id}});
+  const lfOnComfy=await call('/api/jobs','POST',{projectId:proj.id,kind:'video',scene:0,shot:0}).catch(e=>e);
+  assert.ok(lfOnComfy instanceof Error,'tail frame must reject non-cloud providers');
+  // MiniMax 形态的后端也拒绝（直接改 settings.provider 模拟）
+  const savedVideo=settings.video;settings.video={...savedVideo,provider:'minimax',model:'MiniMax-Hailuo-02',baseUrl:'https://api.minimax.chat',keyEnv:'MINIMAX_KEY',profile:'MiniMax Hailuo'};await call('/api/settings','PUT',settings);
+  const lfOnMinimax=await call('/api/jobs','POST',{projectId:proj.id,kind:'video',scene:0,shot:0}).catch(e=>e);
+  assert.ok(lfOnMinimax instanceof Error,'tail frame must reject MiniMax');
+  settings.video=savedVideo;await call('/api/settings','PUT',settings);
+  // seedance 形态后端 + 尾帧 → videoJob 构建通过（入队成功，fixture 不真正出片）
+  settings.video={...savedVideo,provider:'seedance',model:'doubao-seedance-1-0-pro',baseUrl:'https://ark.cn-beijing.volces.com',keyEnv:'ARK_KEY',profile:'Seedance Pro',params:{ratio:'16:9',resolution:'720p'}};await call('/api/settings','PUT',settings);
+  q=await latest();q=await call(`/api/projects/${proj.id}`,'PUT',{revision:q.revision,__lastFrame:{scene:0,shot:0,assetId:lfAsset.id}});
+  q=await latest();assert.equal(q.script.scenes[0].shots[0].lastFrameId,lfAsset.id,'last frame id must persist');
+  const tailJob=await call('/api/jobs','POST',{projectId:proj.id,kind:'video',scene:0,shot:0});
+  assert.ok(tailJob.id,'seedance tail-frame job enqueued');
+  // 清除尾帧
+  q=await latest();q=await call(`/api/projects/${proj.id}`,'PUT',{revision:q.revision,__clearLastFrame:{scene:0,shot:0}});
+  q=await latest();assert.ok(!q.script.scenes[0].shots[0].lastFrameId,'last frame cleared');
+  // 恢复 comfy fixture 后端供后续导出测试（局部 settings.video 已被 seedance 覆盖，用 savedVideo 恢复）
+  settings.video=savedVideo;await call('/api/settings','PUT',settings);
+  q=await latest();q=await call(`/api/projects/${proj.id}`,'PUT',{revision:q.revision,__clearFirstFrame:{scene:0,shot:0}});
+  console.log('Last-frame validation chain verified');
+
   // --- 转场 + 字幕 + 导出档位 ---
   // 需要视频素材：复用前面生成的 generated.assetId？已删除。生成一个新镜头视频。
   q=await latest();

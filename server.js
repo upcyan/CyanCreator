@@ -112,9 +112,10 @@ function videoJob(p,b){
   requireValue(Number.isInteger(b.scene)&&Number.isInteger(b.shot),'镜头索引无效');
   const shot=p.script.scenes[b.scene]?.shots[b.shot];requireValue(shot,'镜头不存在');
   validateDirection(shot);requireValue((shot.characterIds||[]).every(id=>p.characters.some(c=>c.id===id)),'镜头引用了已移除角色，请重新关联');const config=shotConfig(state.settings.video,shot);
-  let firstFrameAssetId;
+  let firstFrameAssetId,lastFrameAssetId;
   if(shot.firstFrameId){const ff=state.assets.find(a=>a.id===shot.firstFrameId&&a.projectId===p.id&&a.kind==='image');requireValue(ff,'首帧图不存在或已被删除，请重新选择');requireValue(['seedance','kling','veo','minimax'].includes(config.provider),'首帧图生视频当前仅支持云端模型（Seedance / 可灵 / Veo / MiniMax）');firstFrameAssetId=ff.id;}
-  return {prompt:compileShot(shot,p,p.script.scenes[b.scene]),chapterId:p.activeChapterId,duration:shot.duration,shotLabel:`${b.scene+1}-${b.shot+1}`,scene:b.scene,shot:b.shot,scriptVersion:p.scriptVersion,config,runtimeConfig:structuredClone(state.deploymentConfig),...(firstFrameAssetId?{firstFrameAssetId}:{})};
+  if(shot.lastFrameId){const lf=state.assets.find(a=>a.id===shot.lastFrameId&&a.projectId===p.id&&a.kind==='image');requireValue(lf,'尾帧图不存在或已被删除，请重新选择');requireValue(['seedance','kling'].includes(config.provider),'尾帧图生视频当前仅支持 Seedance / 可灵');requireValue(shot.firstFrameId,'设置尾帧前请先选择首帧');lastFrameAssetId=lf.id;}
+  return {prompt:compileShot(shot,p,p.script.scenes[b.scene]),chapterId:p.activeChapterId,duration:shot.duration,shotLabel:`${b.scene+1}-${b.shot+1}`,scene:b.scene,shot:b.shot,scriptVersion:p.scriptVersion,config,runtimeConfig:structuredClone(state.deploymentConfig),...(firstFrameAssetId?{firstFrameAssetId}:{}),...(lastFrameAssetId?{lastFrameAssetId}:{})};
 }
 async function pump() {
   if (pumping) return; pumping = true;
@@ -143,14 +144,15 @@ async function pump() {
           else job.note = '生成期间项目发生修改，结果已保留，未覆盖当前稿。';
         } else if (job.kind === 'video') {
           let asset;
-          let firstFrame=null;
+          let firstFrame=null,lastFrame=null;
           if(job.firstFrameAssetId){const fa=state.assets.find(a=>a.id===job.firstFrameAssetId);requireValue(fa,'首帧图素材已被删除');const bytes=readFileSync(fa.file);requireValue(bytes.length<=10*1024*1024,'首帧图片超过 10MB，请压缩后重新导入');firstFrame={bytes,mime:fa.mime||'image/png'};}
+          if(job.lastFrameAssetId){const la=state.assets.find(a=>a.id===job.lastFrameAssetId);requireValue(la,'尾帧图素材已被删除');const lbytes=readFileSync(la.file);requireValue(lbytes.length<=10*1024*1024,'尾帧图片超过 10MB，请压缩后重新导入');lastFrame={bytes:lbytes,mime:la.mime||'image/png'};}
           if(job.config.provider==='native'){
             const output=await deployments.native.generate(job.config,job.runtimeConfig,job.prompt,controller.signal,event=>{job.progress=event;persist();});
             try{asset=await saveAsset(createReadStream(output.file),`镜头 ${job.shotLabel}`,p.id,controller.signal);}finally{await output.cleanup();}
           }else{
             job.progress={phase:'remote',message:'等待远端推理结果'};persist();
-            const response = job.config.provider === 'comfy' ? await comfyVideo(job.config, job.prompt, controller.signal, remote) : ['seedance','kling','veo'].includes(job.config.provider)?await cloudVideo(job.config,job.prompt,job.duration,controller.signal,remote,delay,firstFrame):await minimaxVideo(job.config, job.prompt, job.duration, controller.signal, remote, firstFrame);
+            const response = job.config.provider === 'comfy' ? await comfyVideo(job.config, job.prompt, controller.signal, remote) : ['seedance','kling','veo'].includes(job.config.provider)?await cloudVideo(job.config,job.prompt,job.duration,controller.signal,remote,delay,firstFrame,lastFrame):await minimaxVideo(job.config, job.prompt, job.duration, controller.signal, remote, firstFrame, lastFrame);
             asset=await saveAsset(Readable.fromWeb(response.body),`镜头 ${job.shotLabel}`,p.id,controller.signal);
           }
           Object.assign(asset,{scene:job.scene,shot:job.shot,scriptVersion:job.scriptVersion,jobId:job.id});job.assetId=asset.id;job.progress={phase:'complete'};
@@ -383,6 +385,8 @@ export const server = http.createServer(async (req, res) => {
         if ('exportPreset' in b) {requireValue([null, '720p', '1080p', '720-vertical', '1080-vertical'].includes(b.exportPreset), '导出档位无效'); p.exportPreset = b.exportPreset || null; revise(p);}
         if('__firstFrame' in b){const {scene,shot,assetId}=b.__firstFrame;requireValue(Number.isInteger(scene)&&Number.isInteger(shot),'镜头索引无效');const target=p.script?.scenes[scene]?.shots[shot];requireValue(target,'镜头不存在');requireValue(typeof assetId==='string'&&assetId.length<=100,'首帧素材引用无效');requireValue(state.assets.some(a=>a.id===assetId&&a.kind==='image'),'首帧必须是图片素材');target.firstFrameId=assetId;revise(p);}
         if('__clearFirstFrame' in b){const {scene,shot}=b.__clearFirstFrame;requireValue(Number.isInteger(scene)&&Number.isInteger(shot),'镜头索引无效');const target=p.script?.scenes[scene]?.shots[shot];requireValue(target,'镜头不存在');delete target.firstFrameId;revise(p);}
+        if('__lastFrame' in b){const {scene,shot,assetId}=b.__lastFrame;requireValue(Number.isInteger(scene)&&Number.isInteger(shot),'镜头索引无效');const target=p.script?.scenes[scene]?.shots[shot];requireValue(target,'镜头不存在');requireValue(typeof assetId==='string'&&assetId.length<=100,'尾帧素材引用无效');requireValue(state.assets.some(a=>a.id===assetId&&a.kind==='image'),'尾帧必须是图片素材');requireValue(target.firstFrameId,'设置尾帧前请先选择首帧');target.lastFrameId=assetId;revise(p);}
+        if('__clearLastFrame' in b){const {scene,shot}=b.__clearLastFrame;requireValue(Number.isInteger(scene)&&Number.isInteger(shot),'镜头索引无效');const target=p.script?.scenes[scene]?.shots[shot];requireValue(target,'镜头不存在');delete target.lastFrameId;revise(p);}
         if('characterReference' in b){const {characterId,assetId}=b.characterReference;requireValue(p.characters.some(c=>c.id===characterId),'角色不存在');requireValue(state.assets.some(a=>a.id===assetId&&a.kind==='image'&&a.projectId===p.id&&a.characterId===characterId),'图片不属于此角色');p.characterReferences??={};p.characterReferences[characterId]=assetId;}
         if('audioTracks' in b)p.audioTracks=validateTracks(b.audioTracks,state.assets.filter(a=>a.projectId===p.id));
         if ('subtitles' in b) {
