@@ -8,6 +8,7 @@ import {initCreation,stashChapter,invalidateChapters,mutateStructure,importDocum
 import {assistText} from './lib/assist.js';
 import {guideTurn} from './lib/guide.js';
 import {coachTurn, coachContext} from './lib/coach.js';
+import {applyAgnesPreset} from './lib/agnes-preset.js';
 import {cloudTemplates,cloudPreset,cloudVideo} from './lib/cloud-video.js';
 import {SecretVault,secretStatus,safeError} from './lib/secrets.js';
 import {spawn} from 'node:child_process';
@@ -67,7 +68,7 @@ const chapterDirectory=p=>p.episodes.map(e=>({id:e.id,title:e.title,chapters:e.c
 // Minimal snapshot: queued jobs only consume writing context, timeline and audio plans.
 // Cloning the full project here used to multiply workspace.json by every queued task.
 const taskSnapshot=p=>structuredClone({name:p.name,activeChapterId:p.activeChapterId,brief:p.brief,bible:p.bible,characters:p.characters,worldbook:p.worldbook,outline:p.outline,script:p.script,review:p.review,timeline:p.timeline||[],audioTracks:p.audioTracks||[],subtitles:p.subtitles||[],episodes:chapterDirectory(p)});
-const publicState = () => ({...state,projects:state.projects.map(p=>({...p,episodes:chapterDirectory(p)})),storageError:workspaceStore.error,cloudTemplates,secrets:secretStatus(), videoCapabilities:videoCapabilities(state.settings.video), catalog: publicCatalog(), runtimes: deployments.runtime.status(), deployments: state.deployments.map(({config,...j})=>j), assets: state.assets.map(({file, ...a}) => a), assetUsage: assetUsage(), jobs: state.jobs.map(({snapshot, config, runtimeConfig, guideHistory, ...j}) => j)});
+const publicState = () => ({...state,projects:state.projects.map(p=>({...p,episodes:chapterDirectory(p)})),storageError:workspaceStore.error,onboarded:!!state.onboarded,cloudTemplates,secrets:secretStatus(), videoCapabilities:videoCapabilities(state.settings.video), catalog: publicCatalog(), runtimes: deployments.runtime.status(), deployments: state.deployments.map(({config,...j})=>j), assets: state.assets.map(({file, ...a}) => a), assetUsage: assetUsage(), jobs: state.jobs.map(({snapshot, config, runtimeConfig, guideHistory, ...j}) => j)});
 function assetUsage() {
   const usage = {counts: {}, bytes: {}, totalBytes: 0, perAsset: []};
   for (const a of state.assets) {
@@ -116,7 +117,7 @@ function videoJob(p,b){
   const shot=p.script.scenes[b.scene]?.shots[b.shot];requireValue(shot,'镜头不存在');
   validateDirection(shot);requireValue((shot.characterIds||[]).every(id=>p.characters.some(c=>c.id===id)),'镜头引用了已移除角色，请重新关联');const config=shotConfig(state.settings.video,shot);
   let firstFrameAssetId,lastFrameAssetId;
-  if(shot.firstFrameId){const ff=state.assets.find(a=>a.id===shot.firstFrameId&&a.projectId===p.id&&a.kind==='image');requireValue(ff,'首帧图不存在或已被删除，请重新选择');requireValue(['seedance','kling','veo','minimax'].includes(config.provider)||(config.provider==='comfy'&&config.bindings.image),'首帧图生视频支持云端模型，本地需使用图生视频工作流模板（如 Wan 2.1 图生视频）');firstFrameAssetId=ff.id;}
+  if(shot.firstFrameId){const ff=state.assets.find(a=>a.id===shot.firstFrameId&&a.projectId===p.id&&a.kind==='image');requireValue(ff,'首帧图不存在或已被删除，请重新选择');requireValue(['seedance','kling','veo','minimax','agnes'].includes(config.provider)||(config.provider==='comfy'&&config.bindings.image),'首帧图生视频支持云端模型，本地需使用图生视频工作流模板（如 Wan 2.1 图生视频）');firstFrameAssetId=ff.id;}
   if(shot.lastFrameId){const lf=state.assets.find(a=>a.id===shot.lastFrameId&&a.projectId===p.id&&a.kind==='image');requireValue(lf,'尾帧图不存在或已被删除，请重新选择');requireValue(['seedance','kling'].includes(config.provider),'尾帧图生视频当前仅支持 Seedance / 可灵');requireValue(shot.firstFrameId,'设置尾帧前请先选择首帧');lastFrameAssetId=lf.id;}
   if(shot.firstFrameId&&config.provider==='comfy')requireValue(config.bindings.image,'当前 ComfyUI 工作流未绑定 image 参数，请改用图生视频模板（Wan 2.1 图生视频）');
   return {prompt:compileShot(shot,p,p.script.scenes[b.scene]),chapterId:p.activeChapterId,duration:shot.duration,shotLabel:`${b.scene+1}-${b.shot+1}`,scene:b.scene,shot:b.shot,scriptVersion:p.scriptVersion,config,runtimeConfig:structuredClone(state.deploymentConfig),...(firstFrameAssetId?{firstFrameAssetId}:{}),...(lastFrameAssetId?{lastFrameAssetId}:{})};
@@ -166,7 +167,7 @@ async function pump() {
             try{asset=await saveAsset(createReadStream(output.file),`镜头 ${job.shotLabel}`,p.id,controller.signal);}finally{await output.cleanup();}
           }else{
             job.progress={phase:'remote',message:'等待远端推理结果'};persist();
-            const response = job.config.provider === 'comfy' ? await comfyVideo(job.config, job.prompt, controller.signal, remote, comfyImageName) : ['seedance','kling','veo'].includes(job.config.provider)?await cloudVideo(job.config,job.prompt,job.duration,controller.signal,remote,delay,firstFrame,lastFrame):await minimaxVideo(job.config, job.prompt, job.duration, controller.signal, remote, firstFrame, lastFrame);
+            const response = job.config.provider === 'comfy' ? await comfyVideo(job.config, job.prompt, controller.signal, remote, comfyImageName) : ['seedance','kling','veo','agnes'].includes(job.config.provider)?await cloudVideo(job.config,job.prompt,job.duration,controller.signal,remote,delay,firstFrame,lastFrame):await minimaxVideo(job.config, job.prompt, job.duration, controller.signal, remote, firstFrame, lastFrame);
             asset=await saveAsset(Readable.fromWeb(response.body),`镜头 ${job.shotLabel}`,p.id,controller.signal);
           }
           Object.assign(asset,{scene:job.scene,shot:job.shot,scriptVersion:job.scriptVersion,jobId:job.id});job.assetId=asset.id;job.progress={phase:'complete'};
@@ -248,6 +249,8 @@ export const server = http.createServer(async (req, res) => {
     const extraFiles={'/coach.js':'text/javascript','/shot-canvas.js':'text/javascript','/guide.js':'text/javascript','/character-images.js':'text/javascript','/audio-panel.js':'text/javascript','/creation-editor.js':'text/javascript','/settings-extra.js':'text/javascript','/creation.css':'text/css','/assets/cyancreator-icon.png':'image/png'};
     if(extraFiles[u.pathname]&&['GET','HEAD'].includes(method)){res.setHeader('Cache-Control','no-store');return serveFile(req,res,path.join(ROOT,'public',u.pathname.slice(1)),extraFiles[u.pathname]);}
     if (u.pathname === '/api/state' && method === 'GET') return json(res, {...publicState(), token});
+    if(u.pathname==='/api/agnes-preset'&&method==='GET')return json(res,applyAgnesPreset(state.settings));
+    if (u.pathname === '/api/onboarding' && method === 'POST') {const b = await body(req); requireValue(typeof b.done === 'boolean', '参数无效'); state.onboarded = b.done; persist(); return json(res, {ok: true, onboarded: state.onboarded});}
     if (u.pathname === '/api/h3-preset' && method === 'GET') return json(res, h3Preset());
     const preset = u.pathname.match(/^\/api\/video-presets\/([\w-]+)$/);
     if (preset && method === 'GET') return json(res, videoPreset(preset[1]));
@@ -426,8 +429,11 @@ export const server = http.createServer(async (req, res) => {
     const assetRoute = u.pathname.match(/^\/api\/assets\/([\w-]+)$/);
     if (assetRoute && method === 'PUT') {
       const a = state.assets.find(x => x.id === assetRoute[1]); requireValue(a, '素材不存在', 404);
-      const b = await body(req); requireValue(typeof b.name === 'string' && b.name.trim() && b.name.length <= 120, '名称须为 1–120 字符');
-      a.name = b.name.trim(); persist(); const {file, ...safe} = a; return json(res, safe);
+      const b = await body(req);
+      if (b.name !== undefined) {requireValue(typeof b.name === 'string' && b.name.trim() && b.name.length <= 120, '名称须为 1–120 字符'); a.name = b.name.trim();}
+      if (b.rejected !== undefined) {requireValue(typeof b.rejected === 'boolean', '淘汰标记无效'); a.rejected = b.rejected;}
+      requireValue(b.name !== undefined || b.rejected !== undefined, '缺少需更新的字段');
+      persist(); const {file, ...safe} = a; return json(res, safe);
     }
     if (assetRoute && method === 'DELETE') {
       const a = state.assets.find(x => x.id === assetRoute[1]); requireValue(a, '素材不存在', 404);
@@ -437,6 +443,7 @@ export const server = http.createServer(async (req, res) => {
         if (p.audioTracks?.some(t => t.assetId === a.id)) usedIn.push('音轨 · ' + p.name);
         if (Object.values(p.selectedShots || {}).includes(a.id)) usedIn.push('选定镜头版本 · ' + p.name);
         if (p.characterReferences && Object.values(p.characterReferences).includes(a.id)) usedIn.push('角色参考图 · ' + p.name);
+        if (p.script?.scenes?.some(s => s.shots?.some(x => x.firstFrameId === a.id || x.lastFrameId === a.id))) usedIn.push('镜头首尾帧 · ' + p.name);
       }
       requireValue(!usedIn.length, '素材仍被引用（' + usedIn.slice(0, 3).join('、') + (usedIn.length > 3 ? ' 等' : '') + '），请先移除引用');
       state.assets = state.assets.filter(x => x.id !== a.id); persist();
