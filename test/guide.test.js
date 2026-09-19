@@ -38,5 +38,5 @@ test('引导 HTTP：持续对话、候选确认、章节隔离、冲突和取消
  await wait((await send('新章节')).id);assert.equal(captured.messages.some(m=>m.content==='我的主角是邮差'),false);
  const pending=await send('等待取消');for(let i=0;i<100;i++){await latest();if(state.jobs.find(x=>x.id===pending.id).progress?.characters>0)break;await delay(25);}await call('/api/jobs','POST',{projectId:p.id,kind:'guide',stage:'outline',message:'重复'},400);await call('/api/jobs/'+pending.id+'/cancel','POST',{});await wait(pending.id,'cancelled');
  const persisted=JSON.parse(await readFile(path.join(folder,'data/workspace.json'),'utf8'));assert.ok(persisted.jobs.some(j=>j.id===firstReply.id&&j.result.reply));assert.equal(errors,'');
- const asset=await fetch(base+'/guide.js');assert.equal(asset.status,200);assert.equal(asset.headers.get('cache-control'),'no-store');
+ const asset=await fetch(base+'/coach.js');assert.equal(asset.status,200);assert.equal(asset.headers.get('cache-control'),'no-store');
 });

@@ -1,8 +1,16 @@
+# Dependencies
 node_modules/
 .npm-cache/
-.token-optimizer/
+
+# Local data & runtime
 data/
+test-output/
+
+# Environment & secrets
 .env
+.env.*
+
+# Logs
 *.log
 test-output/
 
