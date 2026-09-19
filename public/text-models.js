@@ -1,5 +1,5 @@
 const roles = ['outline', 'script', 'review'];
-const labels = {outline:'故事大纲', script:'剧本与分镜', review:'一致性审校'};
+const labels = {outline:'故事大纲', script:'剧本分镜', review:'一致性审校'};
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const btn = (name, action, id, disabled = false) => `<button class="small" data-action="${action}" data-id="${esc(id)}" ${disabled ? 'disabled' : ''}>${name}</button>`;
 export function resolvedModelName(text, role) {return text.profiles.find(p => p.id === text.roles[role].profileId)?.model || '尚未配置模型';}

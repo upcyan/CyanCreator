@@ -1,6 +1,6 @@
 // 创作助手：可收起的右侧对话侧边栏。引导模式提供预设对话、代为操作与聚光引导；老手模式仅保留答疑对话。
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const PAGE_NAMES={outline:'故事大纲',script:'剧本与分镜',video:'视频生成',edit:'后期剪辑',models:'设置中心',jobs:'任务记录',projects:'项目管理',assets:'素材库'};
+const PAGE_NAMES={outline:'故事大纲',script:'剧本分镜',video:'视频生成',edit:'后期剪辑',models:'设置中心',jobs:'任务记录',projects:'项目管理',assets:'素材库'};
 const TAB_NAMES={text:'文本模型',video:'视频模型',image:'角色图像',speech:'语音配音',local:'本地部署',security:'密钥管理',updates:'平台更新'};
 // 高亮 / 填写目标目录（key 与服务端 lib/coach.js 保持一致；选择器可超出服务端目录）
 const TARGETS={
@@ -32,7 +32,7 @@ let tour=null,spot=null;const notes=[];
 const coach={open:false,mode:localStorage.getItem('coach:mode')==='expert'?'expert':'guide',draft:'',wizard:false,welcome:false};
 const TOURS={
  workbench:{title:'认识工作台',steps:[
-  {target:'nav-outline',title:'创作主线',body:'左侧是创作主线：故事大纲 → 剧本与分镜 → 视频生成 → 后期剪辑，按顺序推进。下方还有设置中心、任务记录与素材库。'},
+  {target:'nav-outline',title:'创作主线',body:'左侧是创作主线：故事大纲 → 剧本分镜 → 视频生成 → 后期剪辑，按顺序推进。下方还有设置中心、任务记录与素材库。'},
   {page:'outline',target:'steps',title:'阶段进度条',body:'顶部是当前项目的四个阶段，可随时跳转；切换章节后进度按章节独立记录。'},
   {target:'new-project',title:'项目',body:'所有创作都保存在「项目」里。右上角「＋ 新建」创建项目，左侧选择器随时切换。'},
   {page:'models',target:'tab-text',title:'设置中心',body:'模型接入集中在这里：文本、视频、图像、语音、本地部署与密钥管理。'},
@@ -54,7 +54,7 @@ const TOURS={
   {page:'outline',target:'brief',title:'创作简报',body:'展开「项目简报与共享设定」，用一两句话写下题材、主角与想讲的故事。'},
   {target:'save-brief',title:'保存设定',body:'保存简报后，就可以生成或撰写大纲了。',wait:{click:'[data-action="save-brief"]'}}]},
  'make-video':{title:'从分镜到成片',steps:[
-  {page:'script',target:'creation-assist',title:'剧本与分镜',body:'剧本页先保存稿件，再用 AI 伴写生成候选稿或拆解分镜（需要已有剧本）。'},
+  {page:'script',target:'creation-assist',title:'剧本分镜',body:'剧本页先保存稿件，再用 AI 伴写生成候选稿或拆解分镜（需要已有剧本）。'},
   {page:'video',target:'video-generate',title:'生成镜头',body:'视频页选中镜头，调整提示词与参数后「保存并生成」；先在剧本页完成分镜。'},
   {page:'jobs',target:'nav-jobs',title:'任务进度',body:'任务记录显示排队、执行与耗时；生成完成后回到视频页选片。'},
   {page:'edit',target:'export-run',title:'剪辑与导出',body:'把满意的镜头加入时间线，调整顺序、入出点与音量，最后导出成片。'}]}};
@@ -66,7 +66,7 @@ const WIZARD=[
 function videoReady(s){const v=s.settings.video;return ['seedance','kling','veo','agnes','minimax'].includes(v.provider)?!!v.keyEnv:v.provider==='native';}
 const busy=s=>s.jobs.some(j=>j.kind==='coach'&&['queued','running'].includes(j.status));
 
-export function coachShell(){return `<button id="coach-toggle" data-action="coach-toggle" aria-label="展开创作助手"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 3l1.7 4.6L18 9.3l-4.3 1.7L12 15.6l-1.7-4.6L6 9.3l4.3-1.7Z"/><path d="M19 14l.8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8Z"/></svg><span>引导助手</span></button><aside id="coach" hidden aria-label="创作助手"><header class="coach-head"><div><b>创作助手</b><span class="tag" id="coach-mode-tag"></span></div><div class="actions"><button class="small ghost" data-action="coach-mode" id="coach-mode-btn"></button><button class="small ghost" data-action="coach-wizard-open">新手引导</button><button class="small ghost" data-action="coach-close">收起 ›</button></div></header><div id="coach-wizard" hidden></div><div class="coach-log" id="coach-log" role="log" aria-live="polite"></div><div class="coach-chips" id="coach-chips"></div><footer class="coach-composer"><textarea id="coach-input" data-transient maxlength="4000" rows="3" placeholder=""></textarea><div class="actions"><button class="primary small" data-action="coach-send" id="coach-send">发送</button><span class="hint">对话保存在任务记录；生成类操作仍需你在页面确认。</span></div></footer></aside><div id="coach-spot" hidden></div><div id="coach-welcome" hidden><div class="coach-welcome-card"><div class="eyebrow">WELCOME TO CYANCREATOR</div><h2>首次使用，要配置一下吗？</h2><p>第一次使用需要连接文本模型（大纲 / 剧本）与视频模型。可以跟着助手花两分钟完成；也可以跳过，之后随时从侧边栏的「新手引导」开始。</p><div class="actions"><button class="primary" data-action="coach-onboard-start">开始新手引导</button><button class="ghost" data-action="coach-onboard-skip">跳过，我自己探索</button></div></div></div>`;}
+export function coachShell(){return `<button id="coach-toggle" data-action="coach-toggle" aria-label="展开创作助手"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 3l1.7 4.6L18 9.3l-4.3 1.7L12 15.6l-1.7-4.6L6 9.3l4.3-1.7Z"/><path d="M19 14l.8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8Z"/></svg><span>引导助手</span></button><aside id="coach" hidden aria-label="创作助手"><header class="coach-head"><div class="coach-title"><b>创作助手</b><span class="tag" id="coach-mode-tag"></span></div><div class="coach-sub"><button class="small ghost" data-action="coach-mode" id="coach-mode-btn"></button><button class="small ghost" data-action="coach-wizard-open">新手引导</button><button class="small ghost coach-close" data-action="coach-close" aria-label="收起">›</button></div></header><div id="coach-wizard" hidden></div><div class="coach-log" id="coach-log" role="log" aria-live="polite"></div><div class="coach-chips" id="coach-chips"></div><footer class="coach-composer"><textarea id="coach-input" data-transient maxlength="4000" rows="3" placeholder=""></textarea><div class="actions"><button class="primary small" data-action="coach-send" id="coach-send">发送</button><span class="hint">对话保存在任务记录；生成类操作仍需你在页面确认。</span></div></footer></aside><div id="coach-spot" hidden></div><div id="coach-welcome" hidden><div class="coach-welcome-card"><div class="eyebrow">WELCOME TO CYANCREATOR</div><h2>首次使用，要配置一下吗？</h2><p>第一次使用需要连接文本模型（大纲 / 剧本）与视频模型。可以跟着助手花两分钟完成；也可以跳过，之后随时从侧边栏的「新手引导」开始。</p><div class="actions"><button class="primary" data-action="coach-onboard-start">开始新手引导</button><button class="ghost" data-action="coach-onboard-skip">跳过，我自己探索</button></div></div></div>`;}
 function actionLabel(a){return {navigate:()=>`切换到「${PAGE_NAMES[a.page]||a.page}」`,'settings-tab':()=>`打开设置 · ${TAB_NAMES[a.id]||a.id}`,highlight:()=>'高亮了下一步位置',tour:()=>`开始引导：${TOURS[a.id]?.title||a.id}`,fill:()=>`代填${FILL_LABELS[a.target]||a.target}`,'create-project':()=>`创建项目「${a.name}」`,'open-project':()=>`切换到项目「${a.name}」`}[a.type]?.()||a.type;}
 function bubble(j,s){
  const head=`<article class="coach-msg user"><strong>你 · ${j.coach.mode==='expert'?'老手模式':'引导模式'}</strong><p>${esc(j.coach.message)}</p></article>`;
