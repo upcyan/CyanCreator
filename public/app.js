@@ -1,7 +1,7 @@
 import {guideView,guideDraft} from './guide.js';
 import {imageSettings,readImage,characterGallery} from './character-images.js';
 import {audioPanel,speechSettings,readSpeech,speechTemplate,readTracks,setDialogue} from './audio-panel.js';
-import {creationEditor,proposalPreview,captureDocument,editStructure,replaceDraft,libraryRow,readLibrary} from './creation-editor.js';
+import {creationEditor,proposalPreview,captureDocument,editStructure,replaceDraft,libraryRow,readLibrary,toggleCanvas,storyboardCanvas,moveStoryboardShot} from './creation-editor.js';
 import {settingsExtras,cloudTemplatesView,cloudSettings,readCloud} from './settings-extra.js';
 import {updatePanel,handleUpdate} from './updates.js';
 import {videoWorkbench, shotProgress, readShot, flatShots, pickedShots} from './video-workbench.js'; import {nativeSettings, readNative} from './native-settings.js'; import {modelHubView, deploymentProgress, runtimeStatus, readDeploymentConfig} from './model-hub.js'; import {textModelsView, readTextSettings, updateTextProfiles, resolvedModelName} from './text-models.js';
@@ -11,7 +11,7 @@ const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 const stages = ['outline', 'script', 'video', 'edit'];
 const names = {guide:'引导创作',outline:'故事大纲', script:'剧本与分镜', video:'视频生成', edit:'后期剪辑', models:'设置中心', jobs:'任务记录', projects:'项目管理', assets:'素材库', review:'一致性审校', assist:'AI 伴写', 'character-image':'角色立绘',speech:'AI 配音', 'speech-deploy':'本地语音部署', export:'导出成片'};
 const statuses = {queued:'排队中', running:'执行中', succeeded:'已完成', failed:'失败', cancelled:'已取消', interrupted:'执行中断'};
-let videoKey='0-0'; let deploymentDirty=false; let state, projectId = localStorage.getItem('projectId'), page = 'outline', editor = false, dirty = false, previewId = '', timer;
+let videoKey='0-0'; let deploymentDirty=false; let state, projectId = localStorage.getItem('projectId'), page = 'outline', editor = false, dirty = false, previewId = '', timer, canvasMode = false;
 function toast(message) {$('#toast').textContent = message; $('#toast').style.display = 'block'; clearTimeout(timer); timer = setTimeout(() => $('#toast').style.display = 'none', 6000);}
 async function api(url, method = 'GET', data) {
   let r;try{r = await fetch(url, {method, headers: {'Content-Type':'application/json', 'X-Workspace-Token':state?.token || ''}, ...(data === undefined ? {} : {body: JSON.stringify(data)}),signal:AbortSignal.timeout(15000)});}catch{throw new Error('工作台服务未响应，请检查服务是否仍在运行。取消尚未确认；恢复连接后可再次取消，勿重复提交生成任务。');}
@@ -113,6 +113,7 @@ if(action==='video-preview-preset'){for(const [key,value] of Object.entries({ste
     if(action==='creation-export'){download(page+'.json',JSON.stringify(captureDocument(),null,2));return;}
     if(action==='creation-confirm'){await api('/api/projects/'+projectId+'/structure','POST',{revision:project().revision,action:el.dataset.kind,title:$('#chapter-title').value,episodeId:el.dataset.episode,id:el.dataset.id});$('#modal').close();await refresh();return;}
     if(dirty)throw new Error('请先保存当前章节草稿');
+    if(action==='storyboard-mode'){const active=toggleCanvas(project());canvasMode=active;render();toast(active?'已进入画布模式：拖拽卡片编排分镜':'已切换到列表模式');return;}
     if(action==='creation-open-shot'){videoKey=el.dataset.key;page='video';render();return;}
     if(action==='creation-assist'||action==='creation-characters'){await api('/api/jobs','POST',{projectId,kind:'assist',stage:action==='creation-characters'?'characters':page,mode:$('#assist-mode').value,instruction:$('#assist-instruction').value});await refresh();toast('候选稿生成中，完成后可预览再应用');return;}
     const kind=action.replace('creation-','');$('#modal-body').innerHTML=`<h2>${kind==='episode'?'新建剧集':kind==='chapter'?'新建章节':'重命名'}</h2><label>标题<input id="chapter-title" maxlength="120"></label><button data-action="creation-confirm" data-kind="${kind}" data-id="${el.dataset.id||project().activeChapterId}" data-episode="${el.dataset.episode||''}">保存</button>`;$('#modal').showModal();$('#chapter-title').focus();return;
@@ -176,6 +177,28 @@ function parseSubtitles(raw){
 }
 function download(name,text) {const url=URL.createObjectURL(new Blob([text],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 document.addEventListener('click',async e=>{const el=e.target.closest('[data-action]');if(!el)return;el.disabled=true;try{await handle(el.dataset.action,el);}catch(err){toast(err.message);}finally{el.disabled=false;}});
+let sbDrag=null;
+document.addEventListener('dragstart',e=>{const card=e.target.closest&&e.target.closest('[data-sb-shot]');if(card){sbDrag=card.dataset.sbShot;card.classList.add('sb-dragging');e.dataTransfer.effectAllowed='move';}});
+document.addEventListener('dragend',e=>{document.querySelectorAll('.sb-dragging,.sb-over').forEach(x=>x.classList.remove('sb-dragging','sb-over'));sbDrag=null;});
+document.addEventListener('dragover',e=>{
+  if(!sbDrag)return;e.preventDefault();e.dataTransfer.dropEffect='move';
+  document.querySelectorAll('.sb-card.sb-over,.sb-scene.sb-over').forEach(x=>x.classList.remove('sb-over'));
+  const card=e.target.closest&&e.target.closest('[data-sb-shot]');
+  if(card&&card.dataset.sbShot!==sbDrag)card.classList.add('sb-over');
+  else{const zone=e.target.closest&&e.target.closest('[data-sb-scene]');if(zone&&![...zone.querySelectorAll('[data-sb-shot]')].some(x=>x.dataset.sbShot===sbDrag))zone.classList.add('sb-over');}
+});
+document.addEventListener('drop',e=>{
+  if(!sbDrag)return;e.preventDefault();
+  const card=e.target.closest&&e.target.closest('[data-sb-shot]');
+  if(card&&card.dataset.sbShot!==sbDrag){
+    const [fi,fj]=sbDrag.split('.').map(Number),[ti,tj]=card.dataset.sbShot.split('.').map(Number);
+    const rect=card.getBoundingClientRect(),before=(e.clientY<rect.top+rect.height/2)||(fi===ti&&fj<tj);
+    moveStoryboardShot(sbDrag,ti+'.'+(before?tj:tj+1),project());dirty=true;render();toast(`镜头 ${fi+1}.${fj+1} 已移动`);
+    return;
+  }
+  const zone=e.target.closest&&e.target.closest('[data-sb-scene]');
+  if(zone&&Number(zone.dataset.sbScene)!==Number(sbDrag.split('.')[0])){moveStoryboardShot(sbDrag,Number(zone.dataset.sbScene)+':end',project());dirty=true;render();toast('镜头已移动到场景 '+(Number(zone.dataset.sbScene)+1)+' 末尾');}
+});
 document.addEventListener('input',e=>{if(e.target.id==='guide-message')guideDraft(project()).message=e.target.value;if(e.target.matches('[data-deploy-config]'))deploymentDirty=true;if(e.target.closest('#app')&&e.target.id!=='project-select'&&!e.target.matches('[data-transient],[data-editor-nav]')&&e.target.type!=='file'&&!e.target.matches('[data-shot-pick]')&&!e.target.matches('[data-deploy-config]')){dirty=true;const status=$('.form-status');if(status)status.textContent='有未保存修改';}});
 document.addEventListener('change',async e=>{
   try {
