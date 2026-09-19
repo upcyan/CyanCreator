@@ -7,6 +7,7 @@ import http from 'node:http';
 import {initCreation,stashChapter,invalidateChapters,mutateStructure,importDocument,validateLibrary,shotPrompt,validateDirection} from './lib/creation.js';
 import {assistText} from './lib/assist.js';
 import {guideTurn} from './lib/guide.js';
+import {coachTurn, coachContext} from './lib/coach.js';
 import {cloudTemplates,cloudPreset,cloudVideo} from './lib/cloud-video.js';
 import {SecretVault,secretStatus,safeError} from './lib/secrets.js';
 import {spawn} from 'node:child_process';
@@ -107,6 +108,8 @@ async function saveAsset(stream, name, projectId, signal, kind) {
   } catch (e) {await unlink(stored).catch(() => {}); throw e;}
 }
 let pumping = false;
+// 引导助手历史按时间倒序存放（最新在前），coachMessages 内部会反转回对话顺序。
+const coachHistory = () => state.jobs.filter(j => j.kind === 'coach' && j.status === 'succeeded' && j.result?.reply).slice(0, 10).map(j => ({message: j.coach.message, reply: j.result.reply}));
 function videoJob(p,b){
   requireValue(p.script&&!p.stale.script&&!p.stale.outline,'剧本已过期，请先确认最新稿');
   requireValue(Number.isInteger(b.scene)&&Number.isInteger(b.shot),'镜头索引无效');
@@ -136,6 +139,7 @@ async function pump() {
           Object.assign(asset,{chapterId:job.chapterId,characterId:job.characterId,text:job.text});job.assetId=asset.id;
         }
         else if(job.kind==='character-image'){const stream=await generateImage(job.config,job.prompt,controller.signal);const asset=await saveAsset(stream,job.characterName+(job.imageMode==='sheet'?' · 三视图':' · 立绘'),p.id,controller.signal,'image');Object.assign(asset,{characterId:job.characterId,chapterId:job.chapterId,imageMode:job.imageMode,jobId:job.id});job.assetId=asset.id;job.note='图片已入库，请预览后选为角色参考。';}
+        else if(job.kind==='coach'){job.result=await coachTurn(job.config,job.coach,coachContext(state,job.projectId?projectById(job.projectId):null,job.coach.page,job.coach.mode),coachHistory(),controller.signal,event=>{job.progress=event;persist();});controller.signal.throwIfAborted();}
         else if(job.kind==='guide'){job.result=await guideTurn(job.snapshot,job.config,job.guide,job.guideHistory,controller.signal,event=>{job.progress=event;persist();});controller.signal.throwIfAborted();}
         else if(job.kind==='assist'){job.result=await assistText(job.snapshot,job.config,job.assist,controller.signal,event=>{job.progress=event;persist();});job.note='伴写候选已保留，确认后应用。';}
         else if (['outline', 'script', 'review'].includes(job.kind)) {
@@ -241,7 +245,7 @@ export const server = http.createServer(async (req, res) => {
       }
       revise(p);Object.assign(original,p);persist();return json(res,p);
     }
-    const extraFiles={'/guide.js':'text/javascript','/character-images.js':'text/javascript','/audio-panel.js':'text/javascript','/creation-editor.js':'text/javascript','/settings-extra.js':'text/javascript','/creation.css':'text/css','/assets/cyancreator-icon.png':'image/png'};
+    const extraFiles={'/coach.js':'text/javascript','/shot-canvas.js':'text/javascript','/guide.js':'text/javascript','/character-images.js':'text/javascript','/audio-panel.js':'text/javascript','/creation-editor.js':'text/javascript','/settings-extra.js':'text/javascript','/creation.css':'text/css','/assets/cyancreator-icon.png':'image/png'};
     if(extraFiles[u.pathname]&&['GET','HEAD'].includes(method)){res.setHeader('Cache-Control','no-store');return serveFile(req,res,path.join(ROOT,'public',u.pathname.slice(1)),extraFiles[u.pathname]);}
     if (u.pathname === '/api/state' && method === 'GET') return json(res, {...publicState(), token});
     if (u.pathname === '/api/h3-preset' && method === 'GET') return json(res, h3Preset());
@@ -460,7 +464,18 @@ export const server = http.createServer(async (req, res) => {
       return json(res, {ok: true, removed: linked.length});
     }
     if (u.pathname === '/api/jobs' && method === 'POST') {
-      const b = await body(req), p = projectById(b.projectId);
+      const b = await body(req);
+      if (b.kind === 'coach') {
+        requireValue(typeof b.message === 'string' && b.message.trim() && b.message.length <= 4000, '请输入 1–4000 字的助手消息');
+        requireValue(['guide', 'expert'].includes(b.mode), '助手模式无效');
+        requireValue(!state.jobs.some(j => j.kind === 'coach' && ['queued', 'running'].includes(j.status)), '请等待当前回复完成或先取消');
+        const proj = b.projectId ? projectById(b.projectId) : null;
+        const job = {id: randomUUID(), kind: 'coach', status: 'queued', createdAt: new Date().toISOString(), ...(proj ? {projectId: proj.id, chapterId: proj.activeChapterId} : {})};
+        job.coach = {message: b.message.trim(), mode: b.mode, page: String(b.page || '').slice(0, 40)};
+        job.config = structuredClone(resolveTextConfig(state.settings.text, 'outline'));
+        state.jobs.unshift(job); persist(); json(res, {id: job.id}, 202); void pump(); return;
+      }
+      const p = projectById(b.projectId);
       requireValue(['outline', 'script', 'review', 'video', 'export','assist','guide','speech','speech-deploy','character-image'].includes(b.kind), '无效任务类型');
       requireValue(state.jobs.filter(j => ['queued', 'running'].includes(j.status)).length < 20, '队列已满');
       if (b.kind === 'outline') requireValue(p.brief.trim(), '请先保存创作简报');
