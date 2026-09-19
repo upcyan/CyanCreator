@@ -529,4 +529,4 @@ if(b.kind==='assist'){requireValue(['outline','script','characters'].includes(b.
     json(res, {error: '接口不存在'}, 404);
   } catch (e) {if (!res.headersSent) json(res, {error: safeError(e)}, e.status || 400); else res.destroy();}
 });
-server.listen(Number(process.env.PORT || 3210), '127.0.0.1', () => console.log(`CyanCreator 0.4.1 · http://127.0.0.1:${server.address().port}`));
+server.listen(Number(process.env.PORT || 3210), '127.0.0.1', () => console.log(`CyanCreator 0.4.2 · http://127.0.0.1:${server.address().port}`));
