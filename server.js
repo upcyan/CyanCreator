@@ -113,8 +113,9 @@ function videoJob(p,b){
   const shot=p.script.scenes[b.scene]?.shots[b.shot];requireValue(shot,'镜头不存在');
   validateDirection(shot);requireValue((shot.characterIds||[]).every(id=>p.characters.some(c=>c.id===id)),'镜头引用了已移除角色，请重新关联');const config=shotConfig(state.settings.video,shot);
   let firstFrameAssetId,lastFrameAssetId;
-  if(shot.firstFrameId){const ff=state.assets.find(a=>a.id===shot.firstFrameId&&a.projectId===p.id&&a.kind==='image');requireValue(ff,'首帧图不存在或已被删除，请重新选择');requireValue(['seedance','kling','veo','minimax'].includes(config.provider),'首帧图生视频当前仅支持云端模型（Seedance / 可灵 / Veo / MiniMax）');firstFrameAssetId=ff.id;}
+  if(shot.firstFrameId){const ff=state.assets.find(a=>a.id===shot.firstFrameId&&a.projectId===p.id&&a.kind==='image');requireValue(ff,'首帧图不存在或已被删除，请重新选择');requireValue(['seedance','kling','veo','minimax'].includes(config.provider)||(config.provider==='comfy'&&config.bindings.image),'首帧图生视频支持云端模型，本地需使用图生视频工作流模板（如 Wan 2.1 图生视频）');firstFrameAssetId=ff.id;}
   if(shot.lastFrameId){const lf=state.assets.find(a=>a.id===shot.lastFrameId&&a.projectId===p.id&&a.kind==='image');requireValue(lf,'尾帧图不存在或已被删除，请重新选择');requireValue(['seedance','kling'].includes(config.provider),'尾帧图生视频当前仅支持 Seedance / 可灵');requireValue(shot.firstFrameId,'设置尾帧前请先选择首帧');lastFrameAssetId=lf.id;}
+  if(shot.firstFrameId&&config.provider==='comfy')requireValue(config.bindings.image,'当前 ComfyUI 工作流未绑定 image 参数，请改用图生视频模板（Wan 2.1 图生视频）');
   return {prompt:compileShot(shot,p,p.script.scenes[b.scene]),chapterId:p.activeChapterId,duration:shot.duration,shotLabel:`${b.scene+1}-${b.shot+1}`,scene:b.scene,shot:b.shot,scriptVersion:p.scriptVersion,config,runtimeConfig:structuredClone(state.deploymentConfig),...(firstFrameAssetId?{firstFrameAssetId}:{}),...(lastFrameAssetId?{lastFrameAssetId}:{})};
 }
 async function pump() {
@@ -147,12 +148,21 @@ async function pump() {
           let firstFrame=null,lastFrame=null;
           if(job.firstFrameAssetId){const fa=state.assets.find(a=>a.id===job.firstFrameAssetId);requireValue(fa,'首帧图素材已被删除');const bytes=readFileSync(fa.file);requireValue(bytes.length<=10*1024*1024,'首帧图片超过 10MB，请压缩后重新导入');firstFrame={bytes,mime:fa.mime||'image/png'};}
           if(job.lastFrameAssetId){const la=state.assets.find(a=>a.id===job.lastFrameAssetId);requireValue(la,'尾帧图素材已被删除');const lbytes=readFileSync(la.file);requireValue(lbytes.length<=10*1024*1024,'尾帧图片超过 10MB，请压缩后重新导入');lastFrame={bytes:lbytes,mime:la.mime||'image/png'};}
+          let comfyImageName=null;
+          if(job.config.provider==='comfy'&&firstFrame){ // 本地 i2v：上传首帧并注入 image 绑定节点
+            const fd=new FormData();
+            fd.append('image',new Blob([firstFrame.bytes],{type:firstFrame.mime}),`cyan-${job.id}.png`);
+            fd.append('overwrite','true');fd.append('type','input');
+            const up=await(await fetch(job.config.baseUrl.replace(/\/$/,'')+'/upload/image',{method:'POST',body:fd,signal:controller.signal})).json();
+            requireValue(up?.name&&!up.error,'ComfyUI 首帧上传失败，请检查服务状态');
+            comfyImageName=up.subfolder?`${up.name} [${up.subfolder}]`:up.name;
+          }
           if(job.config.provider==='native'){
             const output=await deployments.native.generate(job.config,job.runtimeConfig,job.prompt,controller.signal,event=>{job.progress=event;persist();});
             try{asset=await saveAsset(createReadStream(output.file),`镜头 ${job.shotLabel}`,p.id,controller.signal);}finally{await output.cleanup();}
           }else{
             job.progress={phase:'remote',message:'等待远端推理结果'};persist();
-            const response = job.config.provider === 'comfy' ? await comfyVideo(job.config, job.prompt, controller.signal, remote) : ['seedance','kling','veo'].includes(job.config.provider)?await cloudVideo(job.config,job.prompt,job.duration,controller.signal,remote,delay,firstFrame,lastFrame):await minimaxVideo(job.config, job.prompt, job.duration, controller.signal, remote, firstFrame, lastFrame);
+            const response = job.config.provider === 'comfy' ? await comfyVideo(job.config, job.prompt, controller.signal, remote, comfyImageName) : ['seedance','kling','veo'].includes(job.config.provider)?await cloudVideo(job.config,job.prompt,job.duration,controller.signal,remote,delay,firstFrame,lastFrame):await minimaxVideo(job.config, job.prompt, job.duration, controller.signal, remote, firstFrame, lastFrame);
             asset=await saveAsset(Readable.fromWeb(response.body),`镜头 ${job.shotLabel}`,p.id,controller.signal);
           }
           Object.assign(asset,{scene:job.scene,shot:job.shot,scriptVersion:job.scriptVersion,jobId:job.id});job.assetId=asset.id;job.progress={phase:'complete'};

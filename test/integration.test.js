@@ -25,8 +25,10 @@ test('真实 HTTP 工作流、版本冲突、Comfy 协议、媒体导入和 FFmp
       const output=prompt.includes('故事架构师')?{logline:'最后一盘磁带',beats:[{title:'发现',summary:'听见未来'}]}:prompt.includes('编剧与分镜')?{scenes:[{title:'磁带店 / 夜',action:'青年按下播放键',dialogue:'明天见。',shots:[{prompt:'a quiet tape repair shop at night',duration:5}]}]}:{issues:[],summary:'未发现问题'};
       return reply({choices:[{finish_reason:'stop',message:{content:JSON.stringify(output)}}]});
     }
+    if(req.url==='/upload/image'&&req.method==='POST'){for await(const c of req)void c;return reply({name:'cyan-fixture.png',subfolder:''});}
+    if(req.url.startsWith('/object_info/')){const t=decodeURIComponent(req.url.split('/object_info/')[1]);const spec={LoadImage:{image:[['a.png','b.png']]},Text:{},Sampler:{},WanImageToVideo:{},CLIPVisionLoader:{clip_name:[['cv.safetensors','clip_vision_h.safetensors']]},CLIPVisionEncode:{},EmptyHunyuanLatentVideo:{},ModelSamplingSD3:{},KSampler:{},UNETLoader:{},CLIPLoader:{},VAELoader:{},CLIPTextEncode:{},VAEDecode:{},CreateVideo:{},SaveVideo:{}};return reply({[t]:spec[t]?{input:{required:spec[t]}}:null});}
     if(req.url==='/prompt') {let raw='';for await(const c of req)raw+=c;receivedGraph=JSON.parse(raw).prompt;return reply({prompt_id:'fixture-prompt',node_errors:{}});}
-    if(req.url==='/history/fixture-prompt')return reply({'fixture-prompt':{status:{completed:true,status_str:'success'},outputs:{'9':{videos:[{filename:'sample.mp4',type:'output'}]}}}});
+    if(req.url==='/history/fixture-prompt'){const i2v=JSON.stringify(receivedGraph||{}).includes('CyanCreator_WanI2V');const outputs=i2v?{'13':{images:[{filename:'sample2.mp4',type:'output'}]}}:{'9':{videos:[{filename:'sample.mp4',type:'output'}]}};return reply({'fixture-prompt':{status:{completed:true,status_str:'success'},outputs}});}
     if(req.url.startsWith('/view?')){res.setHeader('Content-Type','video/mp4');return res.end(video);}
     if(req.url==='/v1/models')return reply({data:[{id:'fixture-model'}]});
     if(req.url.startsWith('/object_info/')){const type=req.url.split('/').at(-1);return reply({[type]:{input:{required:{}}}});}
@@ -194,6 +196,14 @@ test('真实 HTTP 工作流、版本冲突、Comfy 协议、媒体导入和 FFmp
   q=await latest();q=await call(`/api/projects/${proj.id}`,'PUT',{revision:q.revision,__clearFirstFrame:{scene:0,shot:0}});
   console.log('Last-frame validation chain verified');
 
+  // --- 本地 ComfyUI i2v：wan21-i2v 模板 + 首帧 → 任务成功 ---
+  q=await latest();q=await call(`/api/projects/${proj.id}`,'PUT',{revision:q.revision,__firstFrame:{scene:0,shot:0,assetId:ffAsset.id}});
+  const i2vTemplate=await call('/api/video-presets/wan21-i2v');
+  settings.video=structuredClone({...i2vTemplate,baseUrl:endpoint});await call('/api/settings','PUT',settings);
+  const i2vJob=await wait((await call('/api/jobs','POST',{projectId:proj.id,kind:'video',scene:0,shot:0})).id);
+  assert.equal(i2vJob.status,'succeeded',i2vJob.error);
+  console.log('Local ComfyUI i2v (first frame) verified');
+
   // --- 转场 + 字幕 + 导出档位 ---
   // 需要视频素材：复用前面生成的 generated.assetId？已删除。生成一个新镜头视频。
   q=await latest();
@@ -217,7 +227,7 @@ test('真实 HTTP 工作流、版本冲突、Comfy 协议、媒体导入和 FFmp
   console.log('Transitions, subtitles and export presets verified');
 
   // --- Seed 延续批量：本地后端（comfy/native）允许，且 seed 按镜头序注入 ---
-  settings.video={...settings.video,params:{steps:8,seed:42},workflow:{...settings.video.workflow,'2':{class_type:'Sampler',inputs:{steps:20,seed:0}}},bindings:{...settings.video.bindings,seed:{node:'2',input:'seed'}}};await call('/api/settings','PUT',settings);
+  settings.video={...settings.video,params:{...settings.video.params,steps:8,seed:42}};await call('/api/settings','PUT',settings);
   const jobsBefore=(await call('/api/state')).jobs.length;
   await call('/api/video/batch','POST',{projectId:proj.id,revision:(await latest()).revision,shots:[{scene:0,shot:0}],seedMode:'continue'});
   const jobsNow=(await call('/api/state')).jobs;
