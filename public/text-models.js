@@ -46,10 +46,14 @@ export function readTextSettings(text) {
 
 export function updateTextProfiles(text, action, id) {
   const next = structuredClone(text), p = next.profiles.find(p => p.id === id);
-  if (action === 'add-profile' || action === 'copy-profile') {
+  if (action === 'add-profile') {
     if (next.profiles.length >= 50) throw new Error('最多保存 50 个模型配置');
-    if (action === 'copy-profile' && !p) throw new Error('模型配置不存在');
-    next.profiles.push({... (p || {baseUrl:'http://127.0.0.1:1234/v1',model:'',keyEnv:'',temperature:0.7,maxTokens:6000}), id:crypto.randomUUID(), name:p ? `${p.name} 副本` : '新模型配置'});
+    next.profiles.unshift({baseUrl:'http://127.0.0.1:1234/v1',model:'',keyEnv:'',temperature:0.7,maxTokens:6000,id:crypto.randomUUID(),name:'新模型配置'});
+  } else if (action === 'copy-profile') {
+    if (next.profiles.length >= 50) throw new Error('最多保存 50 个模型配置');
+    if (!p) throw new Error('模型配置不存在');
+    const idx = next.profiles.indexOf(p);
+    next.profiles.splice(idx + 1, 0, {...structuredClone(p), id:crypto.randomUUID(), name:`${p.name} 副本`});
   } else if (action === 'delete-profile') {
     if (roles.some(r => next.roles[r].profileId === id)) throw new Error('请先切换引用该配置的阶段');
     if (next.profiles.length === 1) throw new Error('至少保留一个模型配置');

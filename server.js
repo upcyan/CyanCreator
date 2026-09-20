@@ -4,7 +4,7 @@ import {imageDefaults,validateImage,inspectImage,portraitPrompt,generateImage} f
 import {SpeechRuntime,speechDefaults,validateSpeech,cloudSpeech} from './lib/speech.js';
 import {inspectAudio,validateTracks} from './lib/audio.js';
 import http from 'node:http';
-import {initCreation,stashChapter,invalidateChapters,mutateStructure,importDocument,validateLibrary,shotPrompt,validateDirection} from './lib/creation.js';
+import {initCreation,stashChapter,invalidateChapters,mutateStructure,importDocument,validateLibrary,validateRelations,shotPrompt,validateDirection} from './lib/creation.js';
 import {assistText} from './lib/assist.js';
 import {guideTurn} from './lib/guide.js';
 import {coachTurn, coachContext} from './lib/coach.js';
@@ -67,7 +67,7 @@ const projectById = id => {const p = state.projects.find(p => p.id === id); requ
 const chapterDirectory=p=>p.episodes.map(e=>({id:e.id,title:e.title,chapters:e.chapters.map(c=>({id:c.id,title:c.title}))}));
 // Minimal snapshot: queued jobs only consume writing context, timeline and audio plans.
 // Cloning the full project here used to multiply workspace.json by every queued task.
-const taskSnapshot=p=>structuredClone({name:p.name,activeChapterId:p.activeChapterId,brief:p.brief,bible:p.bible,characters:p.characters,worldbook:p.worldbook,outline:p.outline,script:p.script,review:p.review,timeline:p.timeline||[],audioTracks:p.audioTracks||[],subtitles:p.subtitles||[],episodes:chapterDirectory(p)});
+const taskSnapshot=p=>structuredClone({name:p.name,activeChapterId:p.activeChapterId,brief:p.brief,bible:p.bible,characters:p.characters,characterRelations:p.characterRelations||[],worldbook:p.worldbook,outline:p.outline,script:p.script,review:p.review,timeline:p.timeline||[],audioTracks:p.audioTracks||[],subtitles:p.subtitles||[],episodes:chapterDirectory(p)});
 const publicState = () => ({...state,projects:state.projects.map(p=>({...p,episodes:chapterDirectory(p)})),storageError:workspaceStore.error,onboarded:!!state.onboarded,cloudTemplates,secrets:secretStatus(), videoCapabilities:videoCapabilities(state.settings.video), catalog: publicCatalog(), runtimes: deployments.runtime.status(), deployments: state.deployments.map(({config,...j})=>j), assets: state.assets.map(({file, ...a}) => a), assetUsage: assetUsage(), jobs: state.jobs.map(({snapshot, config, runtimeConfig, guideHistory, ...j}) => j)});
 function assetUsage() {
   const usage = {counts: {}, bytes: {}, totalBytes: 0, perAsset: []};
@@ -139,7 +139,7 @@ async function pump() {
           else{const response=await cloudSpeech(job.config,job.text,controller.signal);asset=await saveAsset(Readable.fromWeb(response.body),'配音 · '+job.text.slice(0,30),p.id,controller.signal,'audio');}
           Object.assign(asset,{chapterId:job.chapterId,characterId:job.characterId,text:job.text});job.assetId=asset.id;
         }
-        else if(job.kind==='character-image'){const stream=await generateImage(job.config,job.prompt,controller.signal);const asset=await saveAsset(stream,job.characterName+(job.imageMode==='sheet'?' · 三视图':' · 立绘'),p.id,controller.signal,'image');Object.assign(asset,{characterId:job.characterId,chapterId:job.chapterId,imageMode:job.imageMode,jobId:job.id});job.assetId=asset.id;job.note='图片已入库，请预览后选为角色参考。';}
+        else if(job.kind==='character-image'){const stream=await generateImage(job.config,job.prompt,controller.signal);const asset=await saveAsset(stream,job.characterName+(job.imageMode==='sheet'?' · 三视图':' · 立绘'),p.id,controller.signal,'image');Object.assign(asset,{characterId:job.characterId,chapterId:job.chapterId,imageMode:job.imageMode,outfitId:job.outfitId||'',jobId:job.id});job.assetId=asset.id;job.note='图片已入库，请预览后选为角色参考。';}
         else if(job.kind==='coach'){job.result=await coachTurn(job.config,job.coach,coachContext(state,job.projectId?projectById(job.projectId):null,job.coach.page,job.coach.mode),coachHistory(),controller.signal,event=>{job.progress=event;persist();});controller.signal.throwIfAborted();}
         else if(job.kind==='guide'){job.result=await guideTurn(job.snapshot,job.config,job.guide,job.guideHistory,controller.signal,event=>{job.progress=event;persist();});controller.signal.throwIfAborted();}
         else if(job.kind==='assist'){job.result=await assistText(job.snapshot,job.config,job.assist,controller.signal,event=>{job.progress=event;persist();});job.note='伴写候选已保留，确认后应用。';}
@@ -239,9 +239,9 @@ export const server = http.createServer(async (req, res) => {
       if(creation[2]==='structure')mutateStructure(p,b);
       else {
         for(const key of ['brief','bible']){requireValue(typeof b[key]==='string'&&b[key].length<=50000,'设定文字过长');if(b[key]!==p[key])invalidateChapters(p);p[key]=b[key];}
-        const characters=validateLibrary(b.characters,'characters'),worldbook=validateLibrary(b.worldbook,'worldbook');
-        if(JSON.stringify(characters)!==JSON.stringify(p.characters)||JSON.stringify(worldbook)!==JSON.stringify(p.worldbook))invalidateChapters(p);
-        p.characters=characters;p.worldbook=worldbook;
+        const characters=validateLibrary(b.characters,'characters'),worldbook=validateLibrary(b.worldbook,'worldbook'),relations=validateRelations(b.relations??p.characterRelations,characters.map(c=>c.id));
+        if(JSON.stringify(characters)!==JSON.stringify(p.characters)||JSON.stringify(worldbook)!==JSON.stringify(p.worldbook)||JSON.stringify(relations)!==JSON.stringify(p.characterRelations||[]))invalidateChapters(p);
+        p.characters=characters;p.worldbook=worldbook;p.characterRelations=relations;
         if(b.value){requireValue(['outline','script'].includes(b.stage),'无效阶段');if(b.stage==='script')for(const scene of b.value.scenes||[])for(const shot of scene.shots||[])validateDirection(shot);if(JSON.stringify(b.value)!==JSON.stringify(p[b.stage])||p.stale[b.stage])applyDocument(p,b.stage,validateDocument(b.stage,b.value));}
       }
       revise(p);Object.assign(original,p);persist();return json(res,p);
@@ -494,7 +494,8 @@ export const server = http.createServer(async (req, res) => {
       if (['outline', 'script', 'review'].includes(b.kind)) job.config = structuredClone(resolveTextConfig(state.settings.text, b.kind));
       if(b.kind==='speech-deploy'){requireValue(!state.jobs.some(j=>j.kind==='speech-deploy'&&['queued','running'].includes(j.status)),'语音部署已排队');job.runtimeConfig=structuredClone(state.deploymentConfig);}
       if(b.kind==='speech'){requireValue(typeof b.text==='string'&&b.text.trim()&&b.text.length<=10000,'配音文字须为 1–10000 字符');job.text=b.text;job.characterId=b.characterId||'';requireValue(!job.characterId||p.characters.some(c=>c.id===job.characterId),'角色不存在');job.config=structuredClone(state.settings.speech);if(b.voice){requireValue(job.config.provider!=='piper','本地 Piper 当前使用已部署中文音色');job.config.voice=b.voice;}validateSpeech(job.config);}
-      if(b.kind==='character-image'){const c=p.characters.find(c=>c.id===b.characterId);requireValue(c,'请先保存角色');Object.assign(job,{characterId:c.id,characterName:c.name,imageMode:b.mode,prompt:portraitPrompt(c,b.mode,b.instruction||'',p.worldbook),config:structuredClone(validateImage(state.settings.image))});}
+      if(b.kind==='character-image'){const c=p.characters.find(c=>c.id===b.characterId);requireValue(c,'请先保存角色');Object.assign(job,{characterId:c.id,characterName:c.name,imageMode:b.mode,prompt:portraitPrompt(c,b.mode,b.instruction||'',p.worldbook),config:structuredClone(validateImage(state.settings.image)),...(b.outfitId?{outfitId:String(b.outfitId).slice(0,100)}:{})});
+        if(b.outfitId)requireValue((c.outfits||[]).some(o=>o.id===b.outfitId),'服饰不存在');}
       if(b.kind==='guide'){
 requireValue(['outline','script','production'].includes(b.stage)&&typeof b.message==='string'&&b.message.trim()&&b.message.length<=6000,'请填写 1–6000 字的引导消息并选择阶段');
 requireValue(!state.jobs.some(j=>j.kind==='guide'&&j.projectId===p.id&&j.chapterId===p.activeChapterId&&['queued','running'].includes(j.status)),'请等待当前回复完成或先取消');

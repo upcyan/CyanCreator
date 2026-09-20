@@ -5,7 +5,8 @@ export function secretUsage(state){
   for(const p of (state.settings?.text?.profiles||[]))if(p.keyEnv)add(p.keyEnv,p.name||'文本连接');
   const v=state.settings?.video;if(v?.keyEnv)add(v.keyEnv,'视频');if(v?.secretEnv)add(v.secretEnv,'视频密钥');
   if(state.settings?.image?.keyEnv)add(state.settings.image.keyEnv,'图像');
-  if(state.settings?.speech?.keyEnv)add(state.settings.speech.keyEnv,'语音');
+  const sp=state.settings?.speech;
+  if(sp&&sp.keyEnv&&sp.provider!=='piper')add(sp.keyEnv,'语音配音');
   return usage;
 }
 export const KEY_PROVIDERS={'ARK_API_KEY':'火山方舟','GEMINI_API_KEY':'Google Gemini','ZHIPU_API_KEY':'智谱 BigModel','MIMO_KEY':'小米 MiMo','AGNES_API_KEY':'Agnes','SILICONFLOW_API_KEY':'SiliconFlow','MINIMAX_API_KEY':'MiniMax','ELEVENLABS_API_KEY':'ElevenLabs','OPENAI_API_KEY':'OpenAI','TTS_API_KEY':'通用 TTS（未指定厂商）'};
@@ -55,3 +56,5 @@ export function arkBannerView(){return `<section class="panel agnes-banner"><div
 export function zhipuBannerView(){return `<section class="panel agnes-banner"><div class="row"><div><div class="eyebrow">MULTIMODAL · ZHIPU BIGMODEL</div><h2>智谱 BigModel · 文本 + 图像 + 视频一键配置 <span class="model-tag free">免费</span></h2><p>使用同一把 ZHIPU_API_KEY 打通三个环节：文本（GLM-4.7-Flash【免费】，覆盖大纲 / 剧本 / 审校）、图像（CogView-4-250304，角色立绘）、视频（清影 CogVideoX-3，5/10 秒）。</p><p class="hint">点击后合并到当前配置，需保存才生效；密钥在「密钥管理」录入一次即可复用。</p></div><div class="mm-apply"><button class="primary" data-action="zhipu-apply">一键配置</button><span class="mm-name">智谱 BigModel</span></div></div></section>`;}
 
 export function sfBannerView(){return `<section class="panel agnes-banner"><div class="row"><div><div class="eyebrow">MULTIMODAL · SILICONFLOW</div><h2>SiliconFlow · 文本 + 图像一键配置 <span class="model-tag free">免费</span></h2><p>使用同一把 SILICONFLOW_API_KEY 配置文本（Qwen2.5-7B-Instruct【免费】，覆盖大纲 / 剧本 / 审校）与图像（Kolors【免费】，角色立绘）。视频暂未接入。</p><p class="hint">点击后合并到当前配置，需保存才生效；密钥在「密钥管理」录入一次即可复用。</p></div><div class="mm-apply"><button class="primary" data-action="sf-apply">一键配置</button><span class="mm-name">SiliconFlow</span></div></div></section>`;}
+
+export function mossBannerView(){return `<section class="panel agnes-banner"><div class="row"><div><div class="eyebrow">SELF-HOSTED · OPENMOSS</div><h2>MOSS · 本地部署组合（文本 + 语音）</h2><p>自部署 MOSS 系列开源模型（vLLM / Ollama 等提供 OpenAI 兼容接口）：文本对话覆盖大纲 / 剧本 / 审校，MOSS-TTS-Nano 负责语音配音。本机运行、免费离线。</p><p class="hint">填写你部署服务的地址与模型名；本地无鉴权时密钥留空。</p></div><div class="moss-fields"><label>文本服务地址<input id="moss-text-url" data-transient value="http://127.0.0.1:8000/v1"></label><label>文本模型名<input id="moss-text-model" data-transient value="moss"></label><label>语音服务地址<input id="moss-tts-url" data-transient value="http://127.0.0.1:8001/v1"></label><label>语音模型名<input id="moss-tts-model" data-transient value="MOSS-TTS-Nano"></label><label>密钥引用名（可空）<input id="moss-key" data-transient placeholder="本地可留空"></label><button class="primary" data-action="moss-apply">一键配置 MOSS</button></div></div></section>`;}

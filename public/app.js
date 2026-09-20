@@ -1,10 +1,10 @@
 import {coachRender,coachHandle,coachBoot} from './coach.js';
 import {imageSettings,readImage} from './character-images.js';
 import {audioPanel,speechSettings,readSpeech,speechTemplate,readTracks,setDialogue} from './audio-panel.js';
-import {creationEditor,proposalPreview,captureDocument,editStructure,replaceDraft,libraryRow,readLibrary,toggleCanvas,storyboardCanvas,moveStoryboardShot} from './creation-editor.js';
+import {creationEditor,proposalPreview,captureDocument,editStructure,replaceDraft,libraryRow,readLibrary,readRelations,appendPhaseRow,removePhaseRow,addRelationRow,removeRelationRow,addOutfitRow,setCharFilter,toggleCanvas,storyboardCanvas,moveStoryboardShot} from './creation-editor.js';
 import {settingsExtras,cloudTemplatesView,cloudSettings,readCloud,agnesBannerView,geminiBannerView,mimoBannerView,arkBannerView,zhipuBannerView,sfBannerView,secretPendingHtml,secretUsage,secretRowsHtml} from './settings-extra.js';
 import {updatePanel,handleUpdate} from './updates.js';
-import {videoWorkbench, shotProgress, readShot, flatShots, pickedShots, comparePick, compareList, compareClear} from './video-workbench.js'; import {nativeSettings, readNative} from './native-settings.js'; import {modelHubView, deploymentProgress, runtimeStatus, readDeploymentConfig} from './model-hub.js'; import {textModelsView, readTextSettings, updateTextProfiles, resolvedModelName} from './text-models.js';
+import {videoWorkbench, shotProgress, readShot, flatShots, pickedShots, comparePick, compareList, compareClear} from './video-workbench.js'; import {nativeSettings, readNative} from './native-settings.js'; import {modelHubView, deploymentProgress, runtimeStatus, readDeploymentConfig, mossHubCard} from './model-hub.js'; import {textModelsView, readTextSettings, updateTextProfiles, resolvedModelName} from './text-models.js';
 import {assetLibraryView} from './asset-library.js';
 const $ = s => document.querySelector(s);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -121,7 +121,7 @@ async function applySchemeById(id,silent){
 }
 let settingsTab='text';
 function modelsView(){
- const groups=[['schemes','模型方案','预设整套搭配，一键应用',schemesView(state)],['multimodal','多模态模型','一套密钥打通多个创作环节',arkBannerView()+zhipuBannerView()+sfBannerView()+agnesBannerView()+geminiBannerView()+mimoBannerView()],['text','文本模型','模型连接与参数配置；在各创作流程页选择当前使用的模型',textModelsView(state.settings.text)],['video','视频模型','连接与生成参数配置；在视频生成页切换当前模型',cloudTemplatesView(state)+videoSettingsView()],['image','角色图像','立绘与参考图生成服务',imageSettings(state.settings)],['speech','音频模型','语音合成（TTS）模型配置；ASR 暂未接入，配音在剧本页与后期剪辑使用',speechSettings(state.settings)],['local','本地部署','下载权重、管理运行环境与部署任务',modelHubView(state)],['security','密钥管理','集中保存模型密钥并通过引用名复用',settingsExtras(state,secretSearch,secretSort)],['updates','平台更新','检查版本与应用更新',updatePanel()]];
+ const groups=[['schemes','模型方案','预设整套搭配，一键应用',schemesView(state)],['multimodal','组合模型','一次部署 / 一套密钥，组合打通多个创作环节',arkBannerView()+zhipuBannerView()+sfBannerView()+agnesBannerView()+geminiBannerView()+mimoBannerView()],['text','文本模型','模型连接与参数配置；在各创作流程页选择当前使用的模型',textModelsView(state.settings.text)],['video','视频模型','连接与生成参数配置；在视频生成页切换当前模型',cloudTemplatesView(state)+videoSettingsView()],['image','角色图像','立绘与参考图生成服务',imageSettings(state.settings)],['speech','音频模型','语音合成（TTS）模型配置；ASR 暂未接入，配音在剧本页与后期剪辑使用',speechSettings(state.settings)],['local','本地部署','下载权重、管理运行环境与部署任务',modelHubView(state)+mossHubCard(state)],['security','密钥管理','集中保存模型密钥并通过引用名复用',settingsExtras(state,secretSearch,secretSort)],['updates','平台更新','检查版本与应用更新',updatePanel()]];
  return '<div class="settings-layout"><nav class="settings-sections" aria-label="设置分类">'+groups.map(([id,title,description])=>'<button data-action="settings-tab" data-id="'+id+'" class="'+(settingsTab===id?'active':'')+'" aria-pressed="'+(settingsTab===id)+'"><b>'+title+'</b><small>'+description+'</small></button>').join('')+'</nav><div class="settings-content">'+groups.map(([id,title,description,content])=>'<section data-settings-section="'+id+'" '+(settingsTab===id?'':'hidden')+'><header class="settings-section-heading"><div><h2>'+title+'</h2><p class="hint">'+description+'</p></div>'+'</header>'+content.replace(/<button\b[^>]*data-action="save-settings"[^>]*>[\s\S]*?<\/button>/g,'')+'</section>').join('')+'</div></div>';
 }
 function videoSettingsView() {
@@ -222,6 +222,16 @@ $('#modal-body').innerHTML=`<h2>清理未引用素材</h2><p style="margin:8px 0
    s.speech={...s.speech,provider:'compatible',baseUrl:prof?.baseUrl||'https://token-plan-cn.xiaomimimo.com/v1',model:'MiMo-V2.5-TTS',keyEnv:prof?.keyEnv||'MIMO_KEY',voice:'default'};
    await api('/api/settings','PUT',s);state.settings=s;await refresh();
    toast('语音配音已切到 MiMo TTS（限时免费）：生成配音后可在任务记录试听');return;}
+ if(action==='moss-apply'){
+   if(dirty||deploymentDirty)throw new Error('请先保存当前配置');
+   const tUrl=($('#moss-text-url')?.value||'').trim(),tModel=($('#moss-text-model')?.value||'').trim(),vUrl=($('#moss-tts-url')?.value||'').trim(),vModel=($('#moss-tts-model')?.value||'').trim(),key=($('#moss-key')?.value||'').trim();
+   if(!tUrl||!tModel)throw new Error('请填写文本服务地址与模型名');
+   const s=structuredClone(state.settings);
+   if(!s.text.profiles.some(p=>p.id==='moss-default'))s.text.profiles.push({id:'moss-default',name:'MOSS · 文本模型',baseUrl:tUrl,model:tModel,keyEnv:key,temperature:0.7,maxTokens:8192});
+   for(const r of ['outline','script','review'])s.text.roles[r].profileId='moss-default';
+   if(vUrl&&vModel)s.speech={...s.speech,provider:'compatible',baseUrl:vUrl,model:vModel,keyEnv:key,voice:s.speech.voice||'default'};
+   await api('/api/settings','PUT',s);state.settings=s;await refresh();
+   toast('MOSS 一键配置已应用：文本三阶段 + 语音配音（本地部署，免费离线）');return;}
  if(action==='mimo-apply'){
    if(dirty||deploymentDirty)throw new Error('请先保存当前配置');
    const s=structuredClone(state.settings);
@@ -243,20 +253,26 @@ $('#modal-body').innerHTML=`<h2>清理未引用素材</h2><p style="margin:8px 0
 if(action==='video-preview-preset'){for(const [key,value] of Object.entries({steps:8,width:480,height:272}))document.querySelector('[data-shot-param="'+key+'"]').value=value;$('#shot-duration').value=4;dirty=true;toast('已填入 480×272、8 步、4 秒预览参数，保存并生成后生效；画质会降低。');return;}
  if(action==='prompt-preview'){const data=await api('/api/prompt-preview','POST',{projectId,scene:Number(el.dataset.scene),shot:Number(el.dataset.shot),prompt:$('#shot-prompt').value});showModal('实际视频提示词 · 无额外文本模型调用',data.prompt+'\n\n共 '+data.characters+' 字符；仅发送当前镜头。');return;}
  if(action==='settings-tab'){settingsTab=el.dataset.id;document.querySelectorAll('[data-settings-section]').forEach(section=>section.hidden=section.dataset.settingsSection!==settingsTab);document.querySelectorAll('[data-action="settings-tab"]').forEach(button=>{button.classList.toggle('active',button.dataset.id===settingsTab);button.setAttribute('aria-pressed',String(button.dataset.id===settingsTab));});return;}
-  if(action==='character-generate-row'){if(dirty)throw new Error('请先保存角色设定，再生成角色图');const cid=el.dataset.id;const mode=document.querySelector(`[data-image-mode="${cid}"]`)?.value||'portrait';const instruction=document.querySelector(`[data-image-instruction="${cid}"]`)?.value||'';await api('/api/jobs','POST',{projectId,kind:'character-image',characterId:cid,mode,instruction});await refresh();toast('角色图任务已排队，完成后在角色卡片中选择参考');return;}
-  if(action==='voice-generate-row'){const cid=el.dataset.id;const text=document.querySelector(`[data-voice-text="${cid}"]`)?.value.trim();if(!text)throw new Error('请填写配音内容');const voice=document.querySelector(`[data-voice-override="${cid}"]`)?.value.trim();await api('/api/jobs','POST',{projectId,kind:'speech',text,characterId:cid,...(voice?{voice}:{})});await refresh();toast('配音任务已排队，完成后可在任务记录试听');return;}
-  if(action==='voice-fill-row'){const cid=el.dataset.id;const dialogue=(project().script?.scenes||[]).map(sc=>sc.dialogue||'').join('\n');const ta=document.querySelector(`[data-voice-text="${cid}"]`);if(ta){ta.value=dialogue;voiceDrafts.set(cid,dialogue);}return;}
+  if(action==='character-generate-row'){if(dirty)throw new Error('请先保存角色设定，再生成角色图');const cid=el.dataset.id;const mode=document.querySelector(`[data-image-mode="${cid}"]`)?.value||'portrait';let instruction=document.querySelector(`[data-image-instruction="${cid}"]`)?.value||'';const outId=document.querySelector(`[data-image-outfit="${cid}"]`)?.value;const out=(project().characters.find(c=>c.id===cid)?.outfits||[]).find(o=>o.id===outId);if(out&&out.desc)instruction=`穿着${out.name}（${out.desc}）。`+instruction;await api('/api/jobs','POST',{projectId,kind:'character-image',characterId:cid,mode,instruction,...(outId?{outfitId:outId}:{})});await refresh();toast('角色图任务已排队，完成后在角色卡片中选择参考');return;}
   if(action==='character-select'){if(dirty)throw new Error('请先保存稿件');await saveProject({characterReference:{characterId:el.dataset.character,assetId:el.dataset.id}});toast('角色参考图已选定');return;}
   if(action==='job-result'){const j=state.jobs.find(j=>j.id===el.dataset.id);if(j.kind==='coach'){showModal('创作助手',j.result?.reply||'暂无回复');return;}if(j.kind==='guide'){showModal('创作向导',j.result?.reply||'暂无回复');return;}if(j.kind==='assist'){const p=state.projects.find(p=>p.id===j.projectId);$('#modal-body').innerHTML=proposalPreview(j,p);$('#modal').showModal();return;}}
   if(action==='speech-template'){if(dirty)throw new Error('请先保存配置');state.settings.speech=speechTemplate(el.dataset.id);dirty=true;render();return;}
   if(action==='speech-deploy'){if(dirty||deploymentDirty)throw new Error('请先保存设置');if(!projectId)throw new Error('请先创建项目');await api('/api/jobs','POST',{projectId,kind:'speech-deploy'});toast('语音部署已排队，可在任务记录查看');return;}
   if(action.startsWith('audio-')){
     if(action==='audio-dialogue'){setDialogue(project().script?.scenes.map(s=>s.dialogue||'').join('\n')||'');return;}
-    if(action==='audio-generate'){if(dirty)throw new Error('请先保存稿件或音轨');await api('/api/jobs','POST',{projectId,kind:'speech',text:$('#voice-text').value,characterId:$('#voice-character').value,voice:$('#voice-override').value.trim()});await refresh();toast('配音任务已排队');return;}
+    if(action==='audio-generate'){if(dirty)throw new Error('请先保存稿件或音轨');await api('/api/jobs','POST',{projectId,kind:'speech',text:$('#voice-text').value,characterId:$('#voice-character').value,voice:$('#voice-override').value.trim()||((project().characters.find(c=>c.id===$('#voice-character').value)||{}).voiceId||'')});await refresh();toast('配音任务已排队');return;}
     const tracks=readTracks(project());if(page==='script'&&dirty)await saveCreation();if(page==='edit')readTimeline();if(action==='audio-track-add'){if(dirty&&page!=='edit')throw new Error('请先保存当前编辑');const a=state.assets.find(a=>a.id===el.dataset.id);tracks.push({assetId:a.id,role:el.dataset.role,start:0,end:a.duration,offset:0,volume:el.dataset.role==='music'?0.25:1,fadeIn:0,fadeOut:0});}else if(action==='audio-track-remove')tracks.splice(Number(el.dataset.index),1);await saveProject({audioTracks:tracks,...(page==='edit'?{timeline:project().timeline}:{})});toast('音轨已保存，可在后期剪辑中调整位置与混音');return;
   }
 
-  if(action.startsWith('creation-')||action==='storyboard-mode'||action==='sb-generate'){
+  if(action.startsWith('creation-')||action==='storyboard-mode'||action==='sb-generate'||action==='rel-add'||action==='rel-remove'){
+ if(action==='char-avatar'){const card=el.closest('[data-library-row]');const hidden=card?.querySelector('[data-avatar-asset]');if(!hidden)throw new Error('未找到头像位');hidden.value=el.dataset.id;dirty=true;toast('头像已选择，保存稿件后生效并更新关系图谱');return;}
+ if(action==='outfit-add'){addOutfitRow(el.dataset.char);dirty=true;return;}
+ if(action==='outfit-remove'){el.closest('[data-outfit-row]')?.remove();dirty=true;return;}
+ if(action==='creation-phase-add'){appendPhaseRow(el.dataset.char,project());dirty=true;return;}
+ if(action==='creation-phase-remove'){el.closest('.phase-row')?.remove();dirty=true;return;}
+ if(action==='rel-add'){addRelationRow(project());dirty=true;return;}
+ if(action==='rel-remove'){el.closest('[data-rel-row]')?.remove();dirty=true;return;}
+ if(action==='char-filter'){if(dirty){toast('请先保存修改，再筛选');return;}setCharFilter(el.dataset.group);render();return;}
     if(action==='storyboard-mode'){const active=toggleCanvas(project());canvasMode=active;render();toast(active?'已进入画布模式：拖拽卡片编排分镜':'已切换到列表模式');return;}
     if(action==='sb-generate'){if(dirty){await saveCreation();toast('草稿已先保存');}const si=Number(el.dataset.scene),sj=Number(el.dataset.shot);await api('/api/jobs','POST',{projectId,kind:'video',scene:si,shot:sj});await refresh();toast(`镜头 ${si+1}.${sj+1} 已加入生成队列`);return;}
     if(['creation-add','creation-remove','creation-move','creation-shot-add','creation-shot-remove','creation-shot-move'].includes(action)){editStructure(action,el,project());dirty=true;return;}
@@ -285,6 +301,20 @@ if(action==='video-preview-preset'){for(const [key,value] of Object.entries({ste
    await api('/api/settings','PUT',s);state.settings=s;$('#modal').close();await refresh();toast('方案「'+name+'」已保存，可在各流程页一键应用');return;}
  if(action==='scheme-apply'){await applySchemeById(el.dataset.id);localStorage.setItem('modelScheme:'+projectId,el.dataset.id);return;}
  if(action==='scheme-delete'){const s=structuredClone(state.settings);s.schemes=(s.schemes||[]).filter(x=>x.id!==el.dataset.id);await api('/api/settings','PUT',s);state.settings=s;await refresh();toast('方案已删除');return;}
+ if(action==='moss-modal'){
+   const prof=(state.settings.text.profiles||[]).find(p=>p.id==='moss-default')||{};
+   const sp=(state.settings.speech&&state.settings.speech.provider==='compatible')?state.settings.speech:{};
+   $('#modal-body').innerHTML=`<h2>接入 MOSS 本地服务</h2><p class="hint">前提：你已自行启动 MOSS 推理服务（vLLM / Ollama / 推理脚本均可，提供 OpenAI 兼容接口），本工作台负责连接与调用，不自动下载权重。</p><label>文本服务地址（OpenAI 兼容）<input id="moss-text-url" data-transient value="${esc(prof.baseUrl||'http://127.0.0.1:8000/v1')}"></label><label>文本模型名<input id="moss-text-model" data-transient value="${esc(prof.model||'moss')}"></label><label>语音服务地址（OpenAI 兼容 TTS）<input id="moss-tts-url" data-transient value="${esc((state.settings.speech&&state.settings.speech.baseUrl)||'http://127.0.0.1:8001/v1')}"></label><label>语音模型名<input id="moss-tts-model" data-transient value="${esc((state.settings.speech&&state.settings.speech.model)||'MOSS-TTS-Nano')}"></label><label>密钥引用名（本地可空）<input id="moss-key" data-transient value="${esc(prof.keyEnv||'')}"></label><div class="actions" style="margin-top:14px">${button('保存并接入','moss-apply-save','primary')}</div>`;
+   $('#modal').showModal();$('#moss-text-url').focus();return;}
+ if(action==='moss-apply-save'){
+   const tUrl=($('#moss-text-url')?.value||'').trim(),tModel=($('#moss-text-model')?.value||'').trim(),vUrl=($('#moss-tts-url')?.value||'').trim(),vModel=($('#moss-tts-model')?.value||'').trim(),key=($('#moss-key')?.value||'').trim();
+   if(!tUrl||!tModel)throw new Error('请填写文本服务地址与模型名');
+   const s=structuredClone(state.settings);
+   if(!s.text.profiles.some(p=>p.id==='moss-default'))s.text.profiles.push({id:'moss-default',name:'MOSS · 文本模型',baseUrl:tUrl,model:tModel,keyEnv:key,temperature:0.7,maxTokens:8192});
+   for(const r of ['outline','script','review'])s.text.roles[r].profileId='moss-default';
+   if(vUrl&&vModel)s.speech={...s.speech,provider:'compatible',baseUrl:vUrl,model:vModel,keyEnv:key,voice:s.speech.voice||'default'};
+   await api('/api/settings','PUT',s);state.settings=s;await refresh();
+   toast('MOSS 已接入：文本三阶段 + 语音配音（本地部署，免费离线）');return;}
  if(action==='secret-save'){
    const freeName=$('#secret-name').value.trim(),freeValue=$('#secret-value').value;
    const saves=new Map();
@@ -334,7 +364,7 @@ if(action==='video-preview-preset'){for(const [key,value] of Object.entries({ste
   else if(['move-up','move-down','remove-clip'].includes(action)) {readTimeline();const arr=project().timeline,i=Number(el.dataset.index);if(action==='remove-clip')arr.splice(i,1);else {const next=i+(action==='move-up'?-1:1);if(next>=0&&next<arr.length)[arr[i],arr[next]]=[arr[next],arr[i]];}await saveProject({audioTracks:readTracks(project()),timeline:arr});}
   else if(action==='preview') {readTimeline();previewId=el.dataset.id;render();}
 }
-async function saveCreation(){const value=captureDocument(),empty=page==='outline'?!value.logline&&!value.beats.some(b=>b.title||b.summary):!value.scenes.some(s=>s.title||s.action||s.dialogue||s.shots.some(x=>x.prompt));await api('/api/projects/'+projectId+'/draft','POST',{revision:project().revision,stage:page,value:empty?null:value,brief:$('#brief')?.value??project().brief,bible:$('#bible')?.value??project().bible,characters:page==='script'?readLibrary('characters'):project().characters,worldbook:page==='script'?readLibrary('worldbook'):project().worldbook});dirty=false;await refresh();toast('章节与共享设定已保存');}
+async function saveCreation(){const value=captureDocument(),empty=page==='outline'?!value.logline&&!value.beats.some(b=>b.title||b.summary):!value.scenes.some(s=>s.title||s.action||s.dialogue||s.shots.some(x=>x.prompt));const libChars=document.querySelector('[data-library="characters"] [data-library-row]');await api('/api/projects/'+projectId+'/draft','POST',{revision:project().revision,stage:page,value:empty?null:value,brief:$('#brief')?.value??project().brief,bible:$('#bible')?.value??project().bible,characters:libChars?readLibrary('characters'):project().characters,worldbook:libChars?readLibrary('worldbook'):project().worldbook,...(page==='outline'&&document.getElementById('rel-rows')?{relations:readRelations()}:{}),...(libChars?{}:{})});dirty=false;await refresh();toast('章节与共享设定已保存');}
 function fmtSRT(t){const h=Math.floor(t/3600),m=Math.floor(t%3600/60),sec=Math.floor(t%60),ms=Math.round(t%1*1000);return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')},${String(ms).padStart(3,'0')}`;}
 function srtText(subs){return subs.map(s=>`${s.start} ${s.end} ${s.text.replace(/\n/g,' ')}`).join('\n');}
 function toSRT(subs){return subs.map((s,i)=>`${i+1}\n${fmtSRT(s.start)} --> ${fmtSRT(s.end)}\n${s.text}`).join('\n\n')+'\n';}
@@ -467,7 +497,7 @@ function secretMissing(){
   for(const p of state.settings.text.profiles)if(p.keyEnv)need.add(p.keyEnv);
   for(const k of ['keyEnv','secretEnv'])if(state.settings.video[k])need.add(state.settings.video[k]);
   if(state.settings.image.keyEnv)need.add(state.settings.image.keyEnv);
-  if(state.settings.speech.keyEnv)need.add(state.settings.speech.keyEnv);
+  if(state.settings.speech.keyEnv&&state.settings.speech.provider!=='piper')need.add(state.settings.speech.keyEnv);
   return [...need].filter(n=>!have.has(n));
 }
 async function renderSecretUI(){
