@@ -562,6 +562,15 @@ function renderSecretList(){
 function updateSecretBanner(){renderSecretUI();}
 function openAssistPop(){
   const pop=$('#assist-pop'),fl=$('#assist-float');
+  const path=assistField?.dataset.docPath||'';
+  const label={title:'标题',summary:'内容概要',action:'动作与叙述',dialogue:'对白',prompt:'镜头提示词',logline:'一句话故事'}[path.split('.').pop()]||'当前字段';
+  // 先填充内容再测量定位（填充会改变高度）；最后统一钳制，保证任何窗口尺寸下四边不出屏
+  const checks=document.getElementById('assist-pop-models');
+  if(checks&&!checks.hasChildNodes()){
+    const profiles=state.settings?.text?.profiles||[];
+    checks.innerHTML=profiles.length?profiles.map(pr=>'<label class="assist-model-check"><input type="checkbox" value="'+esc(pr.id)+'" checked> '+esc(pr.name)+' &middot; '+esc(pr.model)+'</label>').join(''):'<span class="hint">尚未配置文本模型，请先到设置中心添加。</span>';
+  }
+  $('#assist-pop-text').value=`请针对「${label}」${$('#assist-pop-mode').value}：`;
   pop.hidden=false;
   const br=fl.getBoundingClientRect(),pr=pop.getBoundingClientRect();
   const spaceBelow=innerHeight-br.bottom;
@@ -570,15 +579,11 @@ function openAssistPop(){
   else{pop.style.top=(br.bottom+10)+'px';}
   let left=br.left;if(left+pr.width>innerWidth-10)left=innerWidth-pr.width-10;if(left<10)left=10;
   pop.style.left=left+'px';
-  const path=assistField?.dataset.docPath||'';
-  const label={title:'标题',summary:'内容概要',action:'动作与叙述',dialogue:'对白',prompt:'镜头提示词',logline:'一句话故事'}[path.split('.').pop()]||'当前字段';
-  // 模型勾选列表：打开时按需填充（此前仅在设置页渲染时填充，且引用了不存在的 #assist-pop-model）
-  const checks=document.getElementById('assist-pop-models');
-  if(checks&&!checks.hasChildNodes()){
-    const profiles=state.settings?.text?.profiles||[];
-    checks.innerHTML=profiles.length?profiles.map(pr=>'<label class="assist-model-check"><input type="checkbox" value="'+esc(pr.id)+'" checked> '+esc(pr.name)+' &middot; '+esc(pr.model)+'</label>').join(''):'<span class="hint">尚未配置文本模型，请先到设置中心添加。</span>';
-  }
-  $('#assist-pop-text').value=`请针对「${label}」${$('#assist-pop-mode').value}：`;
+  // 最终钳制：内容过高时向上收紧起点，保证底部入屏；此时可滚动查看全部内容
+  const box=pop.getBoundingClientRect();
+  if(box.bottom>innerHeight-8)pop.style.top=Math.max(8,innerHeight-8-box.height)+'px';
+  if(box.top<8)pop.style.top='8px';
+  if(pop.scrollHeight>pop.offsetHeight+2){pop.style.maxHeight=(innerHeight-16)+'px';pop.style.overflowY='auto';}
 }
 // mousedown + preventDefault：避免按钮抢走文本框焦点引发的隐藏竞态
 document.addEventListener('mousedown',e=>{
