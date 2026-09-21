@@ -181,7 +181,23 @@ async function pump() {
           state.assets.push(asset); job.assetId = asset.id;
         }
         job.status = 'succeeded';
-      } catch (e) {job.status = controller.signal.aborted ? 'cancelled' : 'failed'; job.error = controller.signal.aborted ? job.config?.provider==='native'?'原生推理已停止，未完成视频不会入库。':'已停止本地等待；已提交的远端任务可能继续执行。' : safeError(e);}
+      } catch (e) {
+        // 模型降级：文本生成失败时自动切换备用模型重试
+        if (['outline','script','review'].includes(job.kind)) {
+          const alt = state.settings?.text?.profiles?.find(p => p.id !== job.config?.profileId);
+          if (alt) {
+            job.config = structuredClone({...alt, profileId: alt.id});
+            job.status = 'queued';
+            job.note = `主模型 ${job.config?.model || ''} 失败，已降级到 ${alt.name}`;
+            persist();
+            controllers.delete(job.id);
+            pumping = false;
+            return;
+          }
+        }
+        job.status = controller.signal.aborted ? 'cancelled' : 'failed';
+        job.error = controller.signal.aborted ? '已停止本地等待；已提交的远端任务可能继续执行。' : safeError(e);
+      }
       finally {job.finishedAt = new Date().toISOString(); job.elapsedMs = Date.parse(job.finishedAt) - Date.parse(job.startedAt); controllers.delete(job.id); persist();}
     }
   } finally {pumping = false;}
@@ -502,7 +518,7 @@ requireValue(!state.jobs.some(j=>j.kind==='guide'&&j.projectId===p.id&&j.chapter
 job.guide={stage:b.stage,message:b.message.trim()};job.guideHistory=state.jobs.filter(j=>j.kind==='guide'&&j.projectId===p.id&&j.chapterId===p.activeChapterId&&j.status==='succeeded').slice(0,8).map(j=>({status:j.status,guide:j.guide,result:{reply:j.result.reply}}));
 job.config=structuredClone(resolveTextConfig(state.settings.text,b.stage==='outline'?'outline':'script'));
 }
-if(b.kind==='assist'){requireValue(['outline','script','characters'].includes(b.stage)&&typeof b.instruction==='string'&&b.instruction.length<=10000,'伴写要求无效');job.assist={stage:b.stage,mode:String(b.mode||'续写').slice(0,100),instruction:b.instruction};job.config=structuredClone(resolveTextConfig(state.settings.text,b.stage==='outline'?'outline':'script'));}
+if(b.kind==='assist'){requireValue(['outline','script','characters'].includes(b.stage)&&typeof b.instruction==='string'&&b.instruction.length<=10000,'伴写要求无效');job.assist={stage:b.stage,mode:String(b.mode||'续写').slice(0,100),instruction:b.instruction};job.config=structuredClone(resolveTextConfig(state.settings.text,b.stage==='outline'?'outline':'script'));if(b.profileId){const altProfile=state.settings.text.profiles.find(p=>p.id===b.profileId);if(altProfile)Object.assign(job.config,{baseUrl:altProfile.baseUrl,model:altProfile.model,keyEnv:altProfile.keyEnv});}}
       if (b.kind === 'video') {
         Object.assign(job,videoJob(p,b));
       }

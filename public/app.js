@@ -28,7 +28,11 @@ function render() {
   const p = project(), pending = state.jobs.filter(j => ['queued','running'].includes(j.status)).length;
   $('#app').innerHTML = `<div class="shell"><aside class="sidebar"><div class="brand"><div class="mark"><img src="/assets/cyancreator-icon.png" alt="CyanCreator"></div><div><b>CyanCreator</b><small>YOUR LOCAL AI STUDIO</small></div></div><div class="eyebrow">创作工作空间</div><nav class="nav">${stages.map((s,i) => button(`<span>0${i+1}</span>${names[s]}`, 'navigate', page === s ? 'active' : '', `data-page="${s}"`)).join('')}${button('<span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="m10 3-.6 2.3-2 .9-2.1-.6-2 3.4 1.6 1.7v2.5L3.3 15l2 3.4 2.2-.6 2 .9.5 2.3h4l.6-2.3 2-.9 2.1.6 2-3.4-1.6-1.8v-2.4l1.6-1.8-2-3.4-2.2.6-2-.9L14 3Z"/><circle cx="12" cy="12" r="3.2"/></svg></span>设置中心','navigate',page==='models'?'active':'','data-page="models"')}${button(`<span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 6.5V12l4 2"/></svg></span>任务记录 ${pending ? `· ${countLabel(pending)}` : ''}`,'navigate',page==='jobs'?'active':'','data-page="jobs"')}${button(`<span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="2.5" y="4.5" width="19" height="15" rx="2"/><path d="M7.5 4.5v15M16.5 4.5v15M2.5 9.5h5M2.5 14.5h5M16.5 9.5h5M16.5 14.5h5M7.5 7h4.5M7.5 12h4.5M7.5 17h4.5"/></svg></span>素材库 ${state.assets.length ? `· ${countLabel(state.assets.length)}` : ''}`,'navigate',page==='assets'?'active':'','data-page="assets"')}</nav><div class="sidefoot"><span class="status-dot"></span>本地工作空间<br>项目与素材保存在此机器<br><br>CYANCREATOR / 0.4.2</div></aside><main class="main"><header class="topbar"><div class="actions"><span class="muted">项目 /</span><select id="project-select" aria-label="当前项目"><option value="">选择项目</option>${state.projects.map(x => `<option value="${x.id}" ${x.id===projectId?'selected':''}>${esc(x.name)}</option>`).join('')}</select>${button('＋ 新建','new-project','small ghost')}${p?button('管理','manage-project','small ghost','data-id="'+p.id+'"'):''}</div><div class="right"><span class="tag">LOCAL FIRST</span><span class="muted">${p?`修订 ${p.revision}`:'准备创作'}</span></div></header><div class="workspace">${state.storageError?'<p class="warning">工作区保存受阻，修改暂存在内存，请检查磁盘与文件占用后重试保存。取消任务仍可操作。</p>':''}${stages.includes(page)?`<div class="steps">${stages.map((s,i)=>button(`<span class="num">0${i+1}</span><span>${names[s]}<small>${['构思 · 世界观 · 节拍','场景 · 对白 · 镜头','本地推理 · 素材入库','时间线 · 剪辑 · 导出'][i]}</small></span>`,'navigate',`step ${s===page?'active':''}`,`data-page="${s}"`)).join('')}</div>`:''}<div class="heading"><div><div class="eyebrow">${page==='models'?'MODEL WORKBENCH':page==='jobs'||page==='projects'?'PRODUCTION LOG':'FROM IDEA TO FILM'}</div><h1>${names[page]}</h1><p class="subtitle">${{outline:'让一个想法，长成一个值得讲述的故事。',script:'从故事节拍到台词，再到每一个可执行的镜头。',video:'选择视频模型，把分镜变成画面。',edit:'挑选、裁剪、排序，把镜头连成作品。',models:'让每一个创作环节，连接合适的模型。',jobs:'查看真实执行状态、生成结果与耗时。',projects:'重命名、复制、导出或删除你的项目。',assets:'所有项目生成的视频、音频与图像，集中管理。'}[page]}</p></div><div class="heading-actions">${page==='models'&&dirty?button('保存设置','save-settings','primary'):''}<span class="form-status">${dirty?'有未保存修改':''}</span></div></div>${page==='models'?modelsView():page==='jobs'?jobsView():page==='projects'?projectsView():page==='assets'?assetLibraryView(state):!p?`<div class="hero"><div class="eyebrow">A SPACE FOR YOUR NEXT STORY</div><h2>从灵感的第一行，<br>到成片的最后一帧。</h2><p>大纲、剧本、生成与剪辑，在同一个工作空间。</p><div class="orb"></div></div><div class="panel">${empty('开始你的第一个项目','为故事起一个名字。接入模型前，也可以手动编写、导入素材和完成剪辑。')}<div class="actions">${button('＋ 创建项目','new-project','primary')}${button('配置模型','navigate','','data-page="models"')}</div></div>`:page==='outline'||page==='script'?writingView(p):page==='video'?videoView(p):editView(p)}</div></main></div>`;
   coachRender(state);
-  if(page==='models'&&document.querySelector('[data-settings-section="security"]')){const u=secretUsage(state);const all=[...state.secrets].sort((a,b)=>{if(secretSort==='time-desc'||secretSort==='time-asc'){const av=a.createdAt?Date.parse(a.createdAt):0,bv=b.createdAt?Date.parse(b.createdAt):0;return secretSort==='time-desc'?bv-av:av-bv;}return secretSort==='desc'?b.name.localeCompare(a.name):a.name.localeCompare(b.name);});const shown=all.filter(x=>x.name.toLowerCase().includes(secretSearch.toLowerCase()));const host=document.getElementById('secret-rows');if(host)host.innerHTML=secretRowsHtml(state,u,secretSearch,secretSort,secretEdit).rows;const cnt=document.getElementById('secret-count');if(cnt)cnt.textContent=`显示 ${shown.length} / 共 ${all.length} 个密钥`;}
+  if(page==='models'&&document.querySelector('[data-settings-section="security"]')){
+  if(document.getElementById('assist-pop-models')&&!document.getElementById('assist-pop-models').hasChildNodes()){
+    const profiles=state.settings?.text?.profiles||[];
+    document.getElementById('assist-pop-models').innerHTML=profiles.map(p=>'<label class="assist-model-check"><input type="checkbox" value="'+esc(p.id)+'" checked> '+esc(p.name)+' &middot; '+esc(p.model)+'</label>').join('');
+  }const u=secretUsage(state);const all=[...state.secrets].sort((a,b)=>{if(secretSort==='time-desc'||secretSort==='time-asc'){const av=a.createdAt?Date.parse(a.createdAt):0,bv=b.createdAt?Date.parse(b.createdAt):0;return secretSort==='time-desc'?bv-av:av-bv;}return secretSort==='desc'?b.name.localeCompare(a.name):a.name.localeCompare(b.name);});const shown=all.filter(x=>x.name.toLowerCase().includes(secretSearch.toLowerCase()));const host=document.getElementById('secret-rows');if(host)host.innerHTML=secretRowsHtml(state,u,secretSearch,secretSort,secretEdit).rows;const cnt=document.getElementById('secret-count');if(cnt)cnt.textContent=`显示 ${shown.length} / 共 ${all.length} 个密钥`;}
   hideAssistPop();
   {const fl=$('#assist-float');if(fl)fl.hidden=true;}
   document.querySelectorAll('[data-voice-text]').forEach(t=>{const d=voiceDrafts.get(t.dataset.voiceText);if(d)t.value=d;});
@@ -46,28 +50,9 @@ function modelTag(baseUrl,model){
   return '';
 }
 function tagBadge(baseUrl,model){const t=modelTag(baseUrl,model);return t?`<span class="model-tag ${t}">${t==='local'?'本地部署':'免费'}</span>`:'';}
-function stageModelBar(){
-  const t=state.settings.text;
-  const schemeSel=schemeSelectHtml();
-  const sel=(role,label)=>`<label class="stage-model">${label}<select data-stage-role="${role}" data-transient>${t.profiles.map(pr=>`<option value="${pr.id}" ${t.roles[role].profileId===pr.id?'selected':''}>${esc(pr.name)} · ${esc(pr.model)}</option>`).join('')}</select><span class="hint">生效：${esc(resolvedModelName(t,role))}${tagBadge(t.profiles.find(x=>x.id===t.roles[role].profileId)?.baseUrl,resolvedModelName(t,role))}</span></label>`;
-  return `<div class="panel stage-model-bar">${schemeSel}${page==='outline'?sel('outline','大纲模型'):sel('script','剧本模型')+(t.profiles.length>1?sel('review','审校模型'):'')}<span class="hint">切换立即生效；连接与参数在设置中心调整。</span></div>`;
-}
-function stageVideoBar(){
-  const v=state.settings.video;
-  const curLocal=(v.provider==='native'||v.provider==='comfy')?'<span class="model-tag local">本地部署</span>':'';
-  const curText=(v.provider==='native'?'原生 Wan · 本地推理':v.provider==='comfy'?'ComfyUI · '+(v.profile||'自定义工作流'):v.provider==='minimax'?'MiniMax · 云端':(v.profile||v.provider)+' · '+v.model);
-  const curBadge=(v.provider==='native'||v.provider==='comfy')?'':tagBadge(v.baseUrl,v.model);
-  const opts=[['wan21-native','切换到 原生 Wan · 本地推理'],['wan21','切换到 ComfyUI Wan'],['minimax-h3','切换到 ComfyUI H3'],['seedance','切换到 Seedance · 云端'],['kling','切换到 可灵 · 云端'],['veo','切换到 Veo · 云端'],['agnes','切换到 Agnes · 云端'],['zhipu','切换到 智谱清影 · 云端']];
-  return `<div class="panel stage-model-bar">${schemeSelectHtml()}<label class="stage-model">视频模型<span class="hint">当前：${curLocal}${esc(curText)}${curBadge}</span></label><select id="stage-video-model" data-transient><option value="">切换到…</option>${opts.map(([id,l])=>`<option value="${id}">${l}</option>`).join('')}</select><span class="hint">切换立即生效；连接与参数在设置中心调整。</span></div>`;
-}
-function writingView(p) {return stageModelBar()+(page==='outline'?stageImageBar():'')+(page==='outline'?'<div class="hero"><div class="eyebrow">A SPACE FOR YOUR NEXT STORY</div><h2>从灵感的第一行，<br>到成片的最后一帧。</h2><p>先写故事与人物，再组织分镜；模型连接统一在设置中心管理。</p><div class="orb"></div></div>':'')+creationEditor(p,page,state);}
-function stageImageBar(){
-  const c=state.settings.image;
-  const providerOpts=[['compatible','兼容 Images API · 云端/本地'],['agnes','Agnes 图像'],['automatic1111','本地 AUTOMATIC1111']];
-  return `<div class="panel stage-model-bar"><label class="stage-model">图像模型<span class="hint">当前：${esc(c.model||'未配置')} @ ${esc((c.baseUrl||'').replace(/^https?:\/\//,''))} ${tagBadge(c.baseUrl,c.model)}</span></label><select id="stage-image-provider" data-transient>${providerOpts.map(([v2,l])=>`<option value="${v2}" ${c.provider===v2?'selected':''}>${l}</option>`).join('')}</select><input id="stage-image-base" data-transient value="${esc(c.baseUrl||'')}" placeholder="服务地址" style="width:210px"><input id="stage-image-model2" data-transient value="${esc(c.model||'')}" placeholder="模型 ID / checkpoint" style="width:170px"><input id="stage-image-key" data-transient value="${esc(c.keyEnv||'')}" placeholder="密钥引用名（可空）" style="width:140px"><select id="stage-image-size" data-transient>${['1024x1024','1024x1536','1536x1024'].map(v2=>`<option ${c.size===v2?'selected':''}>${v2}</option>`).join('')}</select>${button('应用','stage-image-apply','small','primary')}<span class="hint">改后点「应用」立即生效；本地 SD 仅允许回环地址。</span></div>`;
-}
+function writingView(p) {return (page==='outline'?'<div class="hero"><div class="eyebrow">A SPACE FOR YOUR NEXT STORY</div><h2>从灵感的第一行，<br>到成片的最后一帧。</h2><p>先写故事与人物，再组织分镜；模型连接统一在设置中心管理。</p><div class="orb"></div></div>':'')+creationEditor(p,page,state);}
 function videoView(p) {
-  return stageVideoBar()+videoWorkbench(p,state,videoKey);+`<div class="panel"><div class="panel-head"><h2>项目素材库</h2><label>导入视频<input id="upload" type="file" accept="video/*"></label></div>${assetsView(p)}</div>`;
+  return videoWorkbench(p,state,videoKey)+`<div class="panel"><div class="panel-head"><h2>项目素材库</h2><label>导入视频<input id="upload" type="file" accept="video/*"></label></div>${assetsView(p)}</div>`;
 }
 function assetsView(p) {
   const assets = state.assets.filter(a=>a.projectId===p.id&&!['audio','image'].includes(a.kind));
@@ -119,10 +104,20 @@ async function applySchemeById(id,silent){
   if(sc.video)s.video=structuredClone(sc.video);
   await api('/api/settings','PUT',s);state.settings=s;await refresh();if(!silent)toast('已应用方案「'+sc.name+'」');
 }
-let settingsTab='text';
+let settingsTab='models';
+let modelsSubTab='text';
 function modelsView(){
- const groups=[['schemes','模型方案','预设整套搭配，一键应用',schemesView(state)],['multimodal','组合模型','一次部署 / 一套密钥，组合打通多个创作环节',arkBannerView()+zhipuBannerView()+sfBannerView()+agnesBannerView()+geminiBannerView()+mimoBannerView()],['text','文本模型','模型连接与参数配置；在各创作流程页选择当前使用的模型',textModelsView(state.settings.text)],['video','视频模型','连接与生成参数配置；在视频生成页切换当前模型',cloudTemplatesView(state)+videoSettingsView()],['image','角色图像','立绘与参考图生成服务',imageSettings(state.settings)],['speech','音频模型','语音合成（TTS）模型配置；ASR 暂未接入，配音在剧本页与后期剪辑使用',speechSettings(state.settings)],['local','本地部署','下载权重、管理运行环境与部署任务',modelHubView(state)+mossHubCard(state)],['security','密钥管理','集中保存模型密钥并通过引用名复用',settingsExtras(state,secretSearch,secretSort)],['updates','平台更新','检查版本与应用更新',updatePanel()]];
+ const groups=[['schemes','模型方案','预设整套搭配，一键应用',schemesView(state)],['multimodal','组合接入','一次部署 / 一套密钥，组合打通多个创作环节',arkBannerView()+zhipuBannerView()+sfBannerView()+agnesBannerView()+geminiBannerView()+mimoBannerView()],['local','本地部署','下载权重、管理运行环境与部署任务',modelHubView(state)+mossHubCard(state)],['models','模型参数','各环节模型连接与参数配置',modelsParamsView()],['security','密钥管理','集中保存模型密钥并通过引用名复用',settingsExtras(state,secretSearch,secretSort)],['updates','平台更新','检查版本与应用更新',updatePanel()]];
  return '<div class="settings-layout"><nav class="settings-sections" aria-label="设置分类">'+groups.map(([id,title,description])=>'<button data-action="settings-tab" data-id="'+id+'" class="'+(settingsTab===id?'active':'')+'" aria-pressed="'+(settingsTab===id)+'"><b>'+title+'</b><small>'+description+'</small></button>').join('')+'</nav><div class="settings-content">'+groups.map(([id,title,description,content])=>'<section data-settings-section="'+id+'" '+(settingsTab===id?'':'hidden')+'><header class="settings-section-heading"><div><h2>'+title+'</h2><p class="hint">'+description+'</p></div>'+'</header>'+content.replace(/<button\b[^>]*data-action="save-settings"[^>]*>[\s\S]*?<\/button>/g,'')+'</section>').join('')+'</div></div>';
+}
+function modelsParamsView(){
+  const tabs=[
+    {id:'text',label:'文本模型',desc:'模型连接与参数配置；在各创作流程页选择当前使用的模型',html:textModelsView(state.settings.text)},
+    {id:'video',label:'视频模型',desc:'连接与生成参数配置；在视频生成页切换当前模型',html:cloudTemplatesView(state)+videoSettingsView()},
+    {id:'image',label:'图像模型',desc:'立绘与参考图生成服务',html:imageSettings(state.settings)},
+    {id:'speech',label:'音频模型',desc:'语音合成（TTS）模型配置',html:speechSettings(state.settings)}
+  ];
+  return `<div class="models-sub-tabs">${tabs.map(t=>`<button class="sub-tab${modelsSubTab===t.id?' active':''}" data-action="models-sub-tab" data-id="${t.id}">${t.label}</button>`).join('')}</div>${tabs.map(t=>`<div class="models-sub-pane" data-sub="${t.id}" ${modelsSubTab===t.id?'':'hidden'}>${t.html}</div>`).join('')}`;
 }
 function videoSettingsView() {
   if(['seedance','kling','veo','agnes'].includes(state.settings.video.provider))return `${cloudSettings(state.settings.video)}`;
@@ -167,10 +162,15 @@ async function handle(action, el) {
  if(action==='assist-float-generate'){
    if(!['outline','script'].includes(page))throw new Error('AI 伴写仅支持大纲与剧本阶段');
    const instr=$('#assist-pop-text').value.trim();if(!instr)throw new Error('请填写你的要求');
+   const checkedModels=[...document.querySelectorAll('#assist-pop-models input:checked')].map(c=>c.value);
+   if(!checkedModels.length)throw new Error('请勾选至少一个模型');
    if(dirty)await saveCreation();
-   await api('/api/jobs','POST',{projectId,kind:'assist',stage:page,mode:$('#assist-pop-mode').value,instruction:instr});
+   for(const pid of checkedModels){
+     const profile=state.settings.text.profiles.find(p=>p.id===pid);
+     await api('/api/jobs','POST',{projectId,kind:'assist',stage:page,instruction:instr,...(profile?{profileId:pid}:{})});
+   }
    $('#assist-pop').hidden=true;$('#assist-float').hidden=true;
-   await refresh();toast('伴写候选生成中，完成后可在任务记录或右侧「伴写候选」中应用');return;}
+   await refresh();toast(`已提交 ${checkedModels.length} 个模型的生成任务`);return;}
  if(action==='version-reject'){const a=state.assets.find(x=>x.id===el.dataset.id);if(!a)throw new Error('素材不存在');await api('/api/assets/'+a.id,'PUT',{rejected:!a.rejected});await refresh();toast(a.rejected?'该版本已恢复为候选':'已标记为弃用版本，可在素材库清理');return;}
  if(action==='ab-compare'){const [x,y]=compareList().map(id=>state.assets.find(a=>a.id===id));if(!x||!y)throw new Error('请先勾选两个版本');$('#modal-body').innerHTML=`<h2>A / B 对比</h2><div class="ab-grid"><div><h3>A · ${esc(x.name)}</h3><video controls autoplay muted loop src="${x.url}"></video></div><div><h3>B · ${esc(y.name)}</h3><video controls autoplay muted loop src="${y.url}"></video></div></div>`;$('#modal').showModal();return;}
  if(action==='assets-cleanup'){
@@ -315,6 +315,20 @@ if(action==='video-preview-preset'){for(const [key,value] of Object.entries({ste
    if(vUrl&&vModel)s.speech={...s.speech,provider:'compatible',baseUrl:vUrl,model:vModel,keyEnv:key,voice:s.speech.voice||'default'};
    await api('/api/settings','PUT',s);state.settings=s;await refresh();
    toast('MOSS 已接入：文本三阶段 + 语音配音（本地部署，免费离线）');return;}
+ if(action==='model-select-popup'){
+   const kind=el.dataset.modelKind||'image';
+   const items=kind==='image'?state.settings.image:{...state.settings.speech};
+   const providers={'image':[['compatible','兼容 Images API · 云端/本地'],['agnes','Agnes 图像'],['automatic1111','本地 AUTOMATIC1111']],'speech':[['compatible','云端兼容接口'],['elevenlabs','ElevenLabs']]};
+   const opts=(providers[kind]||[]).map(([v,l])=>`<option value="${v}" ${state.settings[kind]?.provider===v?'selected':''}>${l}</option>`).join('');
+   const curModel=state.settings[kind]?.model||'';
+   $('#modal-body').innerHTML=`<h2>选择${kind==='image'?'图像':kind==='speech'?'语音':'模型'}模型</h2><label>服务商<select id="popup-provider">${opts}</select></label><label>模型 ID<input id="popup-model" data-transient value="${esc(state.settings[kind]?.model||'')}"></label><label>服务地址<input id="popup-url" data-transient value="${esc(state.settings[kind]?.baseUrl||'')}"></label><label>密钥引用名<input id="popup-key" data-transient value="${esc(state.settings[kind]?.keyEnv||'')}"></label><div class="actions" style="margin-top:14px"><button class="primary" data-action="model-select-save" data-model-kind="${kind}">保存</button></div>`;
+   $('#modal').showModal();return;}
+ if(action==='model-select-save'){
+   const kind=el.dataset.modelKind;const s=structuredClone(state.settings);
+   s[kind].provider=$('#popup-provider').value;s[kind].model=$('#popup-model').value.trim();
+   s[kind].baseUrl=$('#popup-url').value.trim();s[kind].keyEnv=$('#popup-key').value.trim();
+   await api('/api/settings','PUT',s);state.settings=s;await refresh();$('#modal').close();
+   toast('模型已更新');return;}
  if(action==='secret-save'){
    const freeName=$('#secret-name').value.trim(),freeValue=$('#secret-value').value;
    const saves=new Map();
@@ -483,12 +497,19 @@ document.addEventListener('focusin',e=>{
   fl2.hidden=false;
 });
 document.addEventListener('focusout',()=>{setTimeout(()=>{const fl=$('#assist-float');if(!fl||fl.contains(document.activeElement)||$('#assist-pop').contains(document.activeElement))return;if(assistField&&document.activeElement===assistField)return;fl.hidden=true;},200);});
-document.body.insertAdjacentHTML('beforeend',`<div id="assist-float" hidden><button class="primary small" id="assist-float-btn" type="button">✧ AI 伴写</button></div><div id="assist-pop" hidden><label>写作方式<select id="assist-pop-mode" data-transient><option>续写</option><option>润色</option><option>扩写</option><option>重新构思</option><option>拆解分镜</option></select></label><label>你的要求<textarea id="assist-pop-text" data-transient></textarea></label><div class="actions">${'<button class="primary small" data-action="assist-float-generate">生成候选</button>'}${'<button class="small ghost" data-action="assist-float-close">收起</button>'}</div><p class="hint">候选生成后在「伴写候选」或任务记录中预览应用。</p></div>`);
+document.body.insertAdjacentHTML('beforeend',`<div id="assist-float" hidden><button class="primary small" id="assist-float-btn" type="button">✧ AI 伴写</button></div><div id="assist-pop" hidden><label>模型<div class="assist-model-checks" id="assist-pop-models"></div></label><label>写作方式<select id="assist-pop-mode" data-transient><option>续写</option><option>润色</option><option>扩写</option><option>重新构思</option><option>拆解分镜</option></select></label><label>你的要求<textarea id="assist-pop-text" data-transient></textarea></label><div class="actions">${'<button class="primary small" data-action="assist-float-generate">生成候选</button>'}${'<button class="small ghost" data-action="assist-float-close">收起</button>'}</div><p class="hint">候选生成后在「伴写候选」或任务记录中预览应用。</p></div>`);
 let assistField=null;
 function hideAssistPop(){const pop=$('#assist-pop');if(pop&&!pop.hidden)pop.hidden=true;}
 document.addEventListener('keydown',e=>{
   if(e.key==='Escape'){const pop=$('#assist-pop');if(pop&&!pop.hidden){pop.hidden=true;return;}}
   if(e.key==='Enter'&&e.target&&e.target.id==='assist-float-btn'){e.preventDefault();openAssistPop();}
+});
+document.addEventListener('click',e=>{
+  const tab=e.target.closest('.models-sub-tabs .sub-tab');
+  if(!tab)return;
+  modelsSubTab=tab.dataset.id;
+  document.querySelectorAll('.models-sub-pane').forEach(p=>p.hidden=p.dataset.sub!==modelsSubTab);
+  document.querySelectorAll('.models-sub-tabs .sub-tab').forEach(x=>x.classList.toggle('active',x===tab));
 });
 let secretSearch='',secretSort='time-desc',secretEdit=null;
 function secretMissing(){
@@ -517,12 +538,20 @@ function renderSecretList(){
 function updateSecretBanner(){renderSecretUI();}
 function openAssistPop(){
   const pop=$('#assist-pop'),fl=$('#assist-float');
-  pop.style.left=fl.style.left;
-  pop.style.top=(parseFloat(fl.style.top)+42)+'px';
+  pop.hidden=false;
+  const br=fl.getBoundingClientRect(),pr=pop.getBoundingClientRect();
+  const spaceBelow=innerHeight-br.bottom;
+  const popH=pr.height||Math.min(400,innerHeight*.6);
+  if(spaceBelow<popH+20&&br.top>popH+20){pop.style.top=(br.top-popH-10)+'px';}
+  else{pop.style.top=(br.bottom+10)+'px';}
+  let left=br.left;if(left+pr.width>innerWidth-10)left=innerWidth-pr.width-10;if(left<10)left=10;
+  pop.style.left=left+'px';
   const path=assistField?.dataset.docPath||'';
   const label={title:'标题',summary:'内容概要',action:'动作与叙述',dialogue:'对白',prompt:'镜头提示词',logline:'一句话故事'}[path.split('.').pop()]||'当前字段';
+  const profiles=state.settings?.text?.profiles||[];
+  const modelOpts=profiles.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('');
+  $('#assist-pop-model').innerHTML=modelOpts;
   $('#assist-pop-text').value=`请针对「${label}」${$('#assist-pop-mode').value}：`;
-  pop.hidden=false;
 }
 // mousedown + preventDefault：避免按钮抢走文本框焦点引发的隐藏竞态
 document.addEventListener('mousedown',e=>{
