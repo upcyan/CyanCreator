@@ -173,7 +173,7 @@ async function handle(action, el) {
      const profile=state.settings.text.profiles.find(p=>p.id===pid);
      await api('/api/jobs','POST',{projectId,kind:'assist',stage:page,instruction:instr,...(profile?{profileId:pid}:{})});
    }
-   $('#assist-pop').hidden=true;$('#assist-float').hidden=true;
+   $('#assist-pop').hidden=true;$('#assist-float').hidden=true;assistField=null;
    await refresh();toast(`已提交 ${checkedModels.length} 个模型的生成任务`);return;}
  if(action==='version-reject'){const a=state.assets.find(x=>x.id===el.dataset.id);if(!a)throw new Error('素材不存在');await api('/api/assets/'+a.id,'PUT',{rejected:!a.rejected});await refresh();toast(a.rejected?'该版本已恢复为候选':'已标记为弃用版本，可在素材库清理');return;}
  if(action==='ab-compare'){const [x,y]=compareList().map(id=>state.assets.find(a=>a.id===id));if(!x||!y)throw new Error('请先勾选两个版本');$('#modal-body').innerHTML=`<h2>A / B 对比</h2><div class="ab-grid"><div><h3>A · ${esc(x.name)}</h3><video controls autoplay muted loop src="${x.url}"></video></div><div><h3>B · ${esc(y.name)}</h3><video controls autoplay muted loop src="${y.url}"></video></div></div>`;openModalEl(true);return;}
@@ -559,14 +559,37 @@ document.addEventListener('focusin',e=>{
   const t=e.target.closest&&e.target.closest(assistTargets);
   const fl=$('#assist-float');
   if(!t||!['outline','script'].includes(page)){if(fl)fl.hidden=true;return;}
-  assistField=t;window.__af=t;const r=t.getBoundingClientRect(),fl2=$('#assist-float');
-  // fixed 定位：直接用视口坐标；底部放不下时贴到字段上方；左右钳制在视口内
-  const fh=fl2.offsetHeight||34,fw=fl2.offsetWidth||110;
-  let top=r.bottom+8;if(top+fh>innerHeight-8)top=Math.max(8,r.top-fh-8);
-  fl2.style.top=top+'px';
-  fl2.style.left=Math.min(Math.max(r.left,10),Math.max(10,innerWidth-fw-10))+'px';
-  fl2.hidden=false;
+  assistField=t;window.__af=t;
+  fl.hidden=false;
+  positionAssistFloat();
 });
+// 悬浮按钮与弹层跟随字段滚动：页面滚动、容器滚动、窗口尺寸变化时重新定位
+function positionAssistFloat(){
+  const fl=$('#assist-float');if(!fl)return;
+  const t=assistField;if(!t||!t.isConnected){fl.hidden=true;return;}
+  const pop=$('#assist-pop');
+  // 仅当字段仍在焦点内、或伴写弹层仍打开时显示；失焦/关闭后滚动不应复现按钮
+  const focusInField=t===document.activeElement||t.contains(document.activeElement);
+  const popOpen=pop&&!pop.hidden;
+  if(!focusInField&&!popOpen){fl.hidden=true;return;}
+  const r=t.getBoundingClientRect();
+  // 字段已滚出视口 → 隐藏按钮与弹层
+  if(r.bottom<40||r.top>innerHeight-8){fl.hidden=true;if(pop)pop.hidden=true;return;}
+  // 字段在视口内 → 确保显示并贴回字段旁（即使此前因滚出被隐藏）
+  fl.hidden=false;
+  // fixed 定位：直接用视口坐标；底部放不下时贴到字段上方；左右钳制在视口内
+  const fh=fl.offsetHeight||34,fw=fl.offsetWidth||110;
+  let top=r.bottom+8;if(top+fh>innerHeight-8)top=Math.max(8,r.top-fh-8);
+  fl.style.top=top+'px';
+  fl.style.left=Math.min(Math.max(r.left,10),Math.max(10,innerWidth-fw-10))+'px';
+  if(pop&&!pop.hidden)positionAssistPop();
+}
+
+function scheduleAssistSync(){positionAssistFloat();}
+
+window.addEventListener('resize',scheduleAssistSync,{passive:true});
+document.addEventListener('scroll',scheduleAssistSync,{capture:true,passive:true});
+
 document.addEventListener('focusout',()=>{setTimeout(()=>{const fl=$('#assist-float');if(!fl||fl.contains(document.activeElement)||$('#assist-pop').contains(document.activeElement))return;if(assistField&&document.activeElement===assistField)return;fl.hidden=true;},200);});
 document.body.insertAdjacentHTML('beforeend',`<div id="assist-float" hidden><button class="primary small" id="assist-float-btn" type="button">✧ AI 伴写</button></div><div id="assist-pop" hidden><label>模型<div class="assist-model-checks" id="assist-pop-models"></div></label><label>写作方式<select id="assist-pop-mode" data-transient><option>续写</option><option>润色</option><option>扩写</option><option>重新构思</option><option>拆解分镜</option></select></label><label>你的要求<textarea id="assist-pop-text" data-transient></textarea></label><div class="actions">${'<button class="primary small" data-action="assist-float-generate">生成候选</button>'}${'<button class="small ghost" data-action="assist-float-close">收起</button>'}</div><p class="hint">候选生成后在「伴写候选」或任务记录中预览应用。</p></div>`);
 let assistField=null;
@@ -619,6 +642,12 @@ function openAssistPop(){
   }
   $('#assist-pop-text').value=`请针对「${label}」${$('#assist-pop-mode').value}：`;
   pop.hidden=false;
+  positionAssistPop();
+}
+// 弹层跟随：以悬浮按钮为锚点重新定位（打开与滚动同步共用同一套钳制）
+function positionAssistPop(){
+  const pop=$('#assist-pop'),fl=$('#assist-float');
+  if(!pop||pop.hidden)return;
   const br=fl.getBoundingClientRect(),pr=pop.getBoundingClientRect();
   const spaceBelow=innerHeight-br.bottom;
   const popH=pr.height||Math.min(400,innerHeight*.6);
@@ -634,7 +663,7 @@ function openAssistPop(){
 }
 // mousedown + preventDefault：避免按钮抢走文本框焦点引发的隐藏竞态
 document.addEventListener('mousedown',e=>{
-  if(e.target.closest&&e.target.closest('#assist-float button')){e.preventDefault();openAssistPop();return;}
+  if(e.target.closest&&e.target.closest('#assist-float button')){e.preventDefault();openAssistPop();requestAnimationFrame(positionAssistPop);return;}
   if(e.target.closest&&e.target.closest('#assist-pop'))return;
   if(assistField&&e.target===assistField)return;
   hideAssistPop();
