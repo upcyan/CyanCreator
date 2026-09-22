@@ -5,6 +5,7 @@ import {SpeechRuntime,speechDefaults,validateSpeech,cloudSpeech} from './lib/spe
 import {inspectAudio,validateTracks} from './lib/audio.js';
 import http from 'node:http';
 import {initCreation,stashChapter,invalidateChapters,mutateStructure,importDocument,validateLibrary,validateRelations,shotPrompt,validateDirection} from './lib/creation.js';
+import {importNovel,novelToScript,NOVEL_MAX_CHAPTERS,NOVEL_SOURCE_LIMIT} from './lib/novel.js';
 import {assistText} from './lib/assist.js';
 import {guideTurn} from './lib/guide.js';
 import {coachTurn, coachContext} from './lib/coach.js';
@@ -143,6 +144,7 @@ async function pump() {
         else if(job.kind==='coach'){job.result=await coachTurn(job.config,job.coach,coachContext(state,job.projectId?projectById(job.projectId):null,job.coach.page,job.coach.mode),coachHistory(),controller.signal,event=>{job.progress=event;persist();});controller.signal.throwIfAborted();}
         else if(job.kind==='guide'){job.result=await guideTurn(job.snapshot,job.config,job.guide,job.guideHistory,controller.signal,event=>{job.progress=event;persist();});controller.signal.throwIfAborted();}
         else if(job.kind==='assist'){job.result=await assistText(job.snapshot,job.config,job.assist,controller.signal,event=>{job.progress=event;persist();});job.note='伴写候选已保留，确认后应用。';}
+        else if(job.kind==='novel-convert'){const nc=job.novelConvert;job.result={script:await novelToScript(job.snapshot,job.config,{source:nc.source,chapterTitle:nc.chapterTitle,instruction:nc.instruction},controller.signal,event=>{job.progress=event;persist();}),instruction:nc.instruction};job.note='转换稿已保留，确认后应用。';}
         else if (['outline', 'script', 'review'].includes(job.kind)) {
           job.result = await generateText(job.kind, job.snapshot, job.config, controller.signal,event=>{job.progress=event;persist();});
           controller.signal.throwIfAborted();
@@ -249,6 +251,14 @@ export const server = http.createServer(async (req, res) => {
     if(u.pathname==='/api/secrets'&&method==='PUT'){const b=await body(req);await vault.set(b.name,b.value);return json(res,{ok:true,secrets:secretStatus()});}
     if(u.pathname.startsWith('/api/cloud-presets/')&&method==='GET')return json(res,cloudPreset(u.pathname.split('/').at(-1)));
     if(u.pathname==='/api/import-document'&&method==='POST'){const b=await body(req);return json(res,importDocument(b.stage,b.text,b.format));}
+    if(u.pathname==='/api/novel-import'&&method==='POST'){
+      const b=await body(req),p=projectById(b.projectId);requireValue(b.revision===p.revision,'项目已变化，请刷新后重试',409);
+      const copy=structuredClone(p);
+      let out;
+      try{out=importNovel(copy,b);}catch(e){throw e;}
+      revise(copy);Object.assign(p,copy);persist();
+      return json(res,{episodes:chapterDirectory(p),queue:out.queue,truncated:out.truncated,activeChapterId:copy.activeChapterId},201);
+    }
     const creation=u.pathname.match(/^\/api\/projects\/([\w-]+)\/(structure|draft)$/);
     if(creation&&method==='POST'){
       const original=projectById(creation[1]),b=await body(req),p=structuredClone(original);requireValue(b.revision===p.revision,'项目已变化，请刷新后重试',409);
@@ -499,7 +509,7 @@ export const server = http.createServer(async (req, res) => {
         state.jobs.unshift(job); persist(); json(res, {id: job.id}, 202); void pump(); return;
       }
       const p = projectById(b.projectId);
-      requireValue(['outline', 'script', 'review', 'video', 'export','assist','guide','speech','speech-deploy','character-image'].includes(b.kind), '无效任务类型');
+      requireValue(['outline', 'script', 'review', 'video', 'export','assist','guide','speech','speech-deploy','character-image','novel-convert'].includes(b.kind), '无效任务类型');
       requireValue(state.jobs.filter(j => ['queued', 'running'].includes(j.status)).length < 20, '队列已满');
       if (b.kind === 'outline') requireValue(p.brief.trim(), '请先保存创作简报');
       if (b.kind === 'script') requireValue(p.outline && !p.stale.outline, '请先生成或确认最新大纲');
@@ -518,7 +528,13 @@ requireValue(!state.jobs.some(j=>j.kind==='guide'&&j.projectId===p.id&&j.chapter
 job.guide={stage:b.stage,message:b.message.trim()};job.guideHistory=state.jobs.filter(j=>j.kind==='guide'&&j.projectId===p.id&&j.chapterId===p.activeChapterId&&j.status==='succeeded').slice(0,8).map(j=>({status:j.status,guide:j.guide,result:{reply:j.result.reply}}));
 job.config=structuredClone(resolveTextConfig(state.settings.text,b.stage==='outline'?'outline':'script'));
 }
-if(b.kind==='assist'){requireValue(['outline','script','characters'].includes(b.stage)&&typeof b.instruction==='string'&&b.instruction.length<=10000,'伴写要求无效');job.assist={stage:b.stage,mode:String(b.mode||'续写').slice(0,100),instruction:b.instruction};job.config=structuredClone(resolveTextConfig(state.settings.text,b.stage==='outline'?'outline':'script'));if(b.profileId){const altProfile=state.settings.text.profiles.find(p=>p.id===b.profileId);if(altProfile)Object.assign(job.config,{baseUrl:altProfile.baseUrl,model:altProfile.model,keyEnv:altProfile.keyEnv});}}
+if(b.kind==='novel-convert'){
+        requireValue(!state.jobs.some(j=>j.kind==='novel-convert'&&j.projectId===p.id&&j.chapterId===p.activeChapterId&&['queued','running'].includes(j.status)),'已有小说转换任务在进行，请等待完成或先取消');
+        requireValue(typeof b.source==='string'&&b.source.trim()&&b.source.length<=NOVEL_SOURCE_LIMIT,'章节原文应为 1–'+NOVEL_SOURCE_LIMIT+' 字符');
+        job.novelConvert={source:b.source,chapterTitle:String(b.chapterTitle||'').slice(0,120),instruction:String(b.instruction||'').slice(0,2000)};
+        job.config=structuredClone(resolveTextConfig(state.settings.text,'script'));
+      }
+      if(b.kind==='assist'){requireValue(['outline','script','characters'].includes(b.stage)&&typeof b.instruction==='string'&&b.instruction.length<=10000,'伴写要求无效');job.assist={stage:b.stage,mode:String(b.mode||'续写').slice(0,100),instruction:b.instruction};job.config=structuredClone(resolveTextConfig(state.settings.text,b.stage==='outline'?'outline':'script'));if(b.profileId){const altProfile=state.settings.text.profiles.find(p=>p.id===b.profileId);if(altProfile)Object.assign(job.config,{baseUrl:altProfile.baseUrl,model:altProfile.model,keyEnv:altProfile.keyEnv});}}
       if (b.kind === 'video') {
         Object.assign(job,videoJob(p,b));
       }
@@ -535,7 +551,7 @@ if(b.kind==='assist'){requireValue(['outline','script','characters'].includes(b.
         requireValue(job.status === 'succeeded' && job.result && !job.applied, '没有可应用的结果');
         requireValue(b.revision === p.revision, '项目已变化，请刷新后重试', 409);
         requireValue(!job.chapterId||job.chapterId===p.activeChapterId,'请先切换到任务所属章节');
-        if(job.kind==='guide'){requireValue(job.result.candidate&&['outline','script'].includes(job.guide.stage),'此回复没有可应用的稿件');requireValue(p.revision===job.baseRevision,'生成后稿件已修改，请基于最新稿件重新整理候选',409);applyDocument(p,job.guide.stage,job.result.candidate);}else if(job.kind==='assist'&&job.assist.stage==='characters'){p.characters=validateLibrary([...p.characters,...job.result.characters],'characters');invalidateChapters(p);revise(p);}else applyDocument(p,job.kind==='assist'?job.assist.stage:job.kind,job.result);job.applied=true;
+        if(job.kind==='novel-convert'){requireValue(job.result?.script?.scenes?.length,'转换稿为空');const doc=validateDocument('script',job.result.script);for(const s of doc.scenes||[])for(const shot of s.shots||[])validateDirection(shot);applyDocument(p,'script',doc);}else if(job.kind==='guide'){requireValue(job.result.candidate&&['outline','script'].includes(job.guide.stage),'此回复没有可应用的稿件');requireValue(p.revision===job.baseRevision,'生成后稿件已修改，请基于最新稿件重新整理候选',409);applyDocument(p,job.guide.stage,job.result.candidate);}else if(job.kind==='assist'&&job.assist.stage==='characters'){p.characters=validateLibrary([...p.characters,...job.result.characters],'characters');invalidateChapters(p);revise(p);}else applyDocument(p,job.kind==='assist'?job.assist.stage:job.kind,job.result);job.applied=true;
       }
       persist(); return json(res, {ok: true});
     }

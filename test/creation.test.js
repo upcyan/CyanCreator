@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {mkdir,mkdtemp,readFile} from 'node:fs/promises';
 import path from 'node:path';
 import {initCreation,stashChapter,mutateStructure,importDocument,validateLibrary,shotPrompt,invalidateChapters} from '../lib/creation.js';
+import {splitNovelChapters,importNovel} from '../lib/novel.js';
+
 import {SecretVault,secretValue,secretStatus,safeError,vaultBackend} from '../lib/secrets.js';
 import {cloudPreset,cloudVideo,cloudDuration} from '../lib/cloud-video.js';
 test('旧项目迁移与多集章节切换保留独立稿件和视频版本',()=>{
@@ -44,4 +46,48 @@ test('三个云视频协议实际传递参数，轮询与下载不泄露请求�
  const c=cloudPreset(provider),r=await cloudVideo(c,'shot text',provider==='veo'?8:5,AbortSignal.timeout(5000),id=>remote=id);assert.ok(remote);assert.equal(await r.text(),'fixture-video');assert.match(JSON.stringify(submission),/shot text/);if(provider!=='veo')assert.equal(downloadHeaders.Authorization,undefined);
  }assert.throws(()=>cloudDuration('kling',6),/5\/10/);
  }finally{global.fetch=original;for(const k of ['ARK_API_KEY','KLING_ACCESS_KEY','KLING_SECRET_KEY','GEMINI_API_KEY'])delete process.env[k];}
+});
+
+test('小说分章：章回/回目/Markdown 标题识别、无头退化切分、上限保护',()=>{
+ const doc=splitNovelChapters('第一章 雨夜\n甲到店\n\n第二章 清晨\n乙离开');assert.equal(doc.length,2);assert.equal(doc[0].title,'第一章 雨夜');assert.equal(doc[1].text,'乙离开');
+ assert.equal(splitNovelChapters('第一回 起\nA\n第二回 承\nB').length,2);
+ assert.equal(splitNovelChapters('# 场景一\n内容1\n# 场景二\n内容2')[0].title,'场景一');
+ assert.equal(splitNovelChapters('导语\n\n第一章 正题\n正文').length,2);
+ const chunked=splitNovelChapters('x'.repeat(7000));assert.equal(chunked.length,2);assert.equal(chunked[0].title,'片段 1');
+ assert.equal(splitNovelChapters('短文')[0].title,'开篇');
+ assert.throws(()=>splitNovelChapters(''));
+ assert.throws(()=>splitNovelChapters(Array.from({length:61},(_,i)=>`第${i}章\n内容`).join('\n')),/最多导入 60 章/);
+});
+test('小说导入三模式建目录：并入一集 / 一章一集 / 附加当前章',()=>{
+ const mk=()=>{const p={episodes:[],stale:{}};initCreation(p);return p;};
+ const p1=mk();const r1=importNovel(p1,{mode:'chapters-in-episode',text:'第一章 甲\nA\n\n第二章 乙\nB'});assert.equal(r1.queue.length,2);assert.equal(p1.episodes[0].chapters.length,3);assert.ok(p1.episodes[0].chapters[1].novelSource.includes('A'));assert.ok(p1.episodes[0].chapters[2].novelSource.includes('B'));assert.equal(p1.activeChapterId,r1.queue[0].chapterId);
+ const p2=mk();importNovel(p2,{mode:'chapter-per-episode',text:'第一章 甲\nA\n\n第二章 乙\nB'});assert.equal(p2.episodes.length,3);
+ const p3=mk();const before=p3.episodes[0].chapters.length;importNovel(p3,{mode:'current',text:'仅原文'});assert.equal(p3.episodes[0].chapters.length,before);assert.ok(p3.episodes[0].chapters[0].novelSource.includes('仅原文'));
+ assert.throws(()=>importNovel(mk(),{mode:'bad',text:'内容'}),/导入模式无效/);
+ assert.throws(()=>importNovel(mk(),{mode:'chapters-in-episode',text:Array.from({length:61},(_,i)=>`第${i}章\n内容`).join('\n')}),/最多导入 60 章/);
+});
+test('目录编排：跨集移动、全局重排、合并剧本、按场景拆分',()=>{
+ const p={episodes:[],stale:{}};initCreation(p);
+ mutateStructure(p,{action:'chapter',episodeId:p.episodes[0].id,title:'第二章'});
+ mutateStructure(p,{action:'chapter',episodeId:p.episodes[0].id,title:'第三章'});
+ mutateStructure(p,{action:'episode',title:'第 2 集'});
+ const ids=p.episodes.flatMap(e=>e.chapters).map(c=>c.id);
+ mutateStructure(p,{action:'chapter-move',chapterId:ids[2],toEpisodeId:p.episodes[1].id});assert.equal(p.episodes[1].chapters.length,2);
+ mutateStructure(p,{action:'chapter-move',chapterId:ids[2],toEpisodeId:p.episodes[0].id,toIndex:0});assert.equal(p.episodes[0].chapters[0].title,'第三章');
+ mutateStructure(p,{action:'chapter-reorder',order:[ids[1],ids[0],ids[2],ids[3]]});assert.equal(p.episodes.length,1);assert.equal(p.episodes[0].chapters[0].id,ids[1]);
+ mutateStructure(p,{action:'chapter-reorder',order:[[ids[0],ids[1]],[ids[2],ids[3]]]});assert.equal(p.episodes.length,2);
+ p.episodes[0].chapters[0].script={scenes:[{title:'S1',action:'',dialogue:'',shots:[{prompt:'p1',duration:5}]}]};
+ p.episodes[0].chapters[1].script={scenes:[{title:'S2',action:'',dialogue:'',shots:[{prompt:'p2',duration:5}]}]};
+ mutateStructure(p,{action:'chapter-merge',chapterIds:[ids[0],ids[1]],intoChapterId:ids[0]});
+ assert.equal(p.episodes[0].chapters[0].script.scenes.length,2);assert.equal(p.episodes[0].chapters[1].script,null);
+ p.episodes[0].chapters[0].script.scenes.push({title:'S3',action:'',dialogue:'',shots:[{prompt:'p3',duration:5}]});
+ stashChapter(p);
+ mutateStructure(p,{action:'chapter-split-at',chapterId:ids[0],sceneIndex:1});
+ assert.equal(p.episodes[0].chapters.length,3);assert.equal(p.episodes[0].chapters[0].script.scenes.length,1);assert.equal(p.episodes[0].chapters[1].script.scenes.length,2);
+ assert.throws(()=>mutateStructure(p,{action:'chapter-move',chapterId:'nope',toEpisodeId:p.episodes[0].id}));
+ assert.throws(()=>mutateStructure(p,{action:'chapter-reorder',order:['nope']}),/章节顺序/);
+ assert.throws(()=>mutateStructure(p,{action:'chapter-split-at',chapterId:p.episodes[0].chapters[0].id,sceneIndex:0}),/拆分位置/);
+ assert.throws(()=>mutateStructure(p,{action:'chapter-merge',chapterIds:[ids[0]],intoChapterId:ids[0]}),/2–50/);
+ assert.throws(()=>mutateStructure(p,{action:'chapter-merge',chapterIds:[ids[0],'ghost'],intoChapterId:ids[0]}),/未知章节/);
+ assert.equal(p.episodes.flatMap(e=>e.chapters).filter(c=>ids.includes(c.id)).length,4);
 });

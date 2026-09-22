@@ -303,6 +303,13 @@ if(action==='video-preview-preset'){for(const [key,value] of Object.entries({ste
     if(action==='creation-save'||action==='creation-library-save'){await saveCreation();return;}
     if(action==='creation-export'){download(page+'.json',JSON.stringify(captureDocument(),null,2));return;}
     if(action==='creation-confirm'){await api('/api/projects/'+projectId+'/structure','POST',{revision:project().revision,action:el.dataset.kind,title:$('#chapter-title').value,episodeId:el.dataset.episode,id:el.dataset.id});$('#modal').close();await refresh();return;}
+    if(action==='structure-organizer'){if(dirty)throw new Error('请先保存当前章节草稿');$('#modal-body').innerHTML=structureOrganizerHtml(project());openModalEl(true);wireOrganizer(project());return;}
+    if(action==='novel-import-open'){if(dirty)throw new Error('请先保存当前章节草稿');const p=project();$('#modal-body').innerHTML=`<h2>导入小说原本</h2><p class="hint">支持 TXT / Markdown；自动识别「第N章/回/节」或 Markdown 标题分章，无章头时按 6000 字切分。一次最多 60 章。</p><label>选择文件（≤4MB）<input id="novel-file" type="file" accept=".txt,.md,.markdown,text/plain" style="max-width:320px"></label><label>或粘贴正文<textarea id="novel-text" data-transient style="min-height:140px" placeholder="第一章 雨夜\n正文……"></textarea></label><label>导入方式<select id="novel-mode"><option value="chapters-in-episode">全部章节并入一个剧集（推荐：之后再拖动分流到各集）</option><option value="chapter-per-episode">每章拆成一个剧集（一章一集）</option><option value="current">原文附加到当前章节（不新建章节，仅替换本章转换素材）</option></select></label><label id="novel-episode-row">目标剧集（并入模式）<select id="novel-episode">${p.episodes.map(e=>`<option value="${e.id}">${esc(e.title)}</option>`).join('')}</select></label><div class="actions" style="margin-top:12px"><button class="primary" data-action="org-novel">导入并建章</button></div><p class="hint">导入只建章节并保存原文素材；每个新章节进「剧本分镜」页点「✦ AI 转剧本」逐章生成剧本（消耗文本模型调用）。导入会先保存项目并切换到首个新章节。</p>`;openModalEl();return;}
+    if(action==='org-apply'){await applyOrganizer(project());await refresh();$('#modal').close();toast('目录编排已保存');return;}
+    if(action==='org-novel'){const file=$('#novel-file')?.files?.[0];const text=($('#novel-text')?.value||'').trim();const raw=file?await file.text():text;const mode=$('#novel-mode')?.value||'chapters-in-episode';const episodeId=$('#novel-episode')?.value||'';if(!raw.trim())throw new Error('请选择小说文件或粘贴正文');if(file&&file.size>4*1024*1024)throw new Error('文件不能超过 4MB');const r=await api('/api/novel-import','POST',{revision:project().revision,mode,episodeId,text:raw});projectId=state.projects.find(x=>x.id===projectId).activeChapterId;localStorage.setItem('projectId',projectId);await refresh();$('#modal').close();toast(`已导入 ${r.queue.length} 章${r.truncated?'（部分超长章节已截断）':''}；每章可用「AI 转剧本」生成剧本`);return;}
+    if(action==='novel-convert-open'){if(dirty)throw new Error('请先保存当前章节草稿');const ch=project().episodes.flatMap(e=>e.chapters).find(c=>c.id===project().activeChapterId);if(!ch?.novelSource)throw new Error('当前章节没有小说原文：请先在「✦ 小说导入」导入，或把原文粘贴到转换窗');$('#modal-body').innerHTML=`<h2>AI 转剧本 · ${esc(ch.title)}</h2><p class="hint">原文 ${ch.novelSource.length} 字，将按当前剧本模型生成场景与镜头，完成后在任务记录确认应用。</p><label>附加要求（可选）<textarea id="novel-instruction" data-transient style="min-height:80px" placeholder="例如：只保留主线场景；对白用口语；每场最多 3 个镜头"></textarea></label><div class="actions" style="margin-top:12px"><button class="primary" data-action="novel-convert-start">开始转换</button><button class="ghost" data-action="novel-convert-preview">只看提示词结构</button></div>`;openModalEl();return;}
+    if(action==='novel-convert-start'){const instruction=($('#novel-instruction')?.value||'').trim();const ch=project().episodes.flatMap(e=>e.chapters).find(c=>c.id===project().activeChapterId);await api('/api/jobs','POST',{projectId,kind:'novel-convert',source:ch.novelSource,chapterTitle:ch.title,instruction});$('#modal').close();await refresh();toast('小说转剧本已入队，完成后在任务记录「应用结果」');return;}
+    if(action==='novel-convert-preview'){const ch=project().episodes.flatMap(e=>e.chapters).find(c=>c.id===project().activeChapterId);const sys='你是编剧与分镜导演。把小说原文忠实改编为剧本分镜……（完整结构：{scenes:[{title,action,dialogue,shots:[{prompt,duration}]}]}）';showModal('转换提示词结构',`模型角色：${sys}\n\n上下文：创作简报 + 故事设定 + 角色与世界书 + 章节名 + 小说原文（${ch?.novelSource?.length||0} 字）+ 附加要求`);return;}
     if(dirty)throw new Error('请先保存当前章节草稿');
     if(action==='creation-open-shot'){videoKey=el.dataset.key;page='video';render();return;}
     if(action==='creation-characters'){if(dirty)throw new Error('请先保存当前章节草稿');const instruction=($('#char-gen-instruction')?.value||'').trim()||'依据创作简报、故事设定与当前稿件，生成主要人物设定（含声音特征）';await api('/api/jobs','POST',{projectId,kind:'assist',stage:'characters',mode:'人物设定',instruction});await refresh();toast('人物设定生成中，完成后在「伴写候选」应用');return;}
@@ -423,6 +430,45 @@ function parseSubtitles(raw){
   return out;
 }
 function download(name,text) {const url=URL.createObjectURL(new Blob([text],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+// ---------- 目录编排（章节↔剧集灵活重排）----------
+let orgPlan=null;
+function structureOrganizerHtml(p){
+  const flat=p.episodes.flatMap(e=>e.chapters);
+  orgPlan=p.episodes.map((e,ei)=>({title:e.title,ids:e.chapters.map(c=>c.id)}));
+  return `<h2>目录编排</h2><p class="hint">拖动章节卡片调整顺序或拖入其他剧集分组；映射不必一章对一集。保存后按此结构重建剧集与章节。</p>
+  <div id="org-board" style="display:flex;gap:14px;flex-wrap:wrap;margin:14px 0">${orgPlan.map((g,gi)=>`<div class="org-group" data-org-group="${gi}" style="min-width:220px;flex:1;border:1px dashed var(--line);border-radius:10px;padding:12px"><b>${esc(g.title)}</b><small class="hint">第 ${gi+1} 集</small><div class="org-list" style="display:flex;flex-direction:column;gap:8px;margin-top:8px">${g.ids.map(id=>{const c=flat.find(x=>x.id===id);return `<div class="org-chip" draggable="true" data-org-chip="${id}" style="border:1px solid var(--line);background:#202820;border-radius:8px;padding:8px 10px;cursor:grab"><span>${esc(c?.title||id.slice(0,8))}</span><button class="small ghost" data-action="org-remove-chip" data-chip="${id}" title="删除该章节" style="margin-left:8px;padding:0 6px">×</button></div>`;}).join('')}</div></div>`).join('')}</div>
+  <div class="actions"><button class="ghost small" data-action="org-add-group">＋ 新增剧集分组</button><button class="ghost small" data-action="org-merge-visible">合并为单集连播</button><span style="flex:1"></span><button class="primary" data-action="org-apply">保存编排</button></div>
+  <p class="hint">「合并为单集连播」把全部章节并入一个剧集；也可以在「章节管理」里用合并 / 拆分处理章节内部结构。</p>`;
+}
+function wireOrganizer(p){
+  const board=document.getElementById('org-board');if(!board)return;
+  let dragging=null;
+  board.addEventListener('dragstart',e=>{const chip=e.target.closest('[data-org-chip]');if(!chip)return;dragging=chip.dataset.orgChip;chip.style.opacity='.4';});
+  board.addEventListener('dragend',e=>{const chip=e.target.closest('[data-org-chip]');if(chip)chip.style.opacity='';});
+  board.addEventListener('dragover',e=>{const list=e.target.closest('.org-list');if(list){e.preventDefault();list.style.outline='2px solid var(--accent)';}});
+  board.addEventListener('dragleave',e=>{const list=e.target.closest('.org-list');if(list)list.style.outline='';});
+  board.addEventListener('drop',e=>{
+    const list=e.target.closest('.org-list');if(!list||!dragging)return;e.preventDefault();list.style.outline='';
+    const chip=list.querySelector(`[data-org-chip="${dragging}"]`);
+    if(chip&&chip.parentElement!==list)list.appendChild(chip);
+    else if(chip){const after=[...list.querySelectorAll('[data-org-chip]')].find(x=>x!==chip&&x.getBoundingClientRect().top>e.clientY);list.insertBefore(chip,after||null);}
+    dragging=null;
+  });
+  board.addEventListener('click',async e=>{
+    const act=e.target.closest('[data-action]')?.dataset.action;
+    if(act==='org-remove-chip'){const chip=e.target.closest('[data-org-chip]');if(chip)chip.remove();return;}
+    if(act==='org-add-group'){const gi=orgPlan.length;orgPlan.push({title:`第 ${gi+1} 集`,ids:[]});board.insertAdjacentHTML('beforeend',`<div class="org-group" data-org-group="${gi}" style="min-width:220px;flex:1;border:1px dashed var(--line);border-radius:10px;padding:12px"><b>第 ${gi+1} 集</b><small class="hint">新分组</small><div class="org-list" style="display:flex;flex-direction:column;gap:8px;margin-top:8px"></div></div>`);}
+  });
+}
+async function applyOrganizer(p){
+  const board=document.getElementById('org-board');if(!board)throw new Error('编排面板未打开');
+  const groups=[...board.querySelectorAll('.org-group')].filter(g=>g.querySelector('[data-org-chip]'));
+  const order=groups.map(g=>[...g.querySelectorAll('[data-org-chip]')].map(x=>x.dataset.orgChip));
+  const flatCount=p.episodes.flatMap(e=>e.chapters).length;
+  const total=order.reduce((a,b)=>a+b.length,0);
+  if(total!==flatCount)throw new Error(`有 ${flatCount-total} 个章节未放入任何剧集`);
+  await api('/api/projects/'+projectId+'/structure','POST',{revision:p.revision,action:'chapter-reorder',order});
+}
 document.addEventListener('click',async e=>{const el=e.target.closest('[data-action]');if(!el)return;el.disabled=true;try{await handle(el.dataset.action,el);}catch(err){toast(err.message);}finally{el.disabled=false;}});
 let sbDrag=null;
 let tlDrag=null;
