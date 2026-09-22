@@ -210,7 +210,7 @@ test('真实 HTTP 工作流、版本冲突、Comfy 协议、媒体导入和 FFmp
   const vid=await wait((await call('/api/jobs','POST',{projectId:proj.id,kind:'video',scene:0,shot:0})).id);assert.equal(vid.status,'succeeded',vid.error);
   q=await latest();const vidAsset=state.assets.find(a=>a.id===vid.assetId);
   // 时间线：两个片段 + fade；非法转场应 400
-  const badTl=await call(`/api/projects/${proj.id}`,'PUT',{revision:q.revision,timeline:[{assetId:vidAsset.id,start:0,end:1,volume:1,transition:'wipe'}]}).catch(e=>e);assert.ok(badTl instanceof Error,'unknown transition must fail');
+  const badTl=await call(`/api/projects/${proj.id}`,'PUT',{revision:q.revision,timeline:[{assetId:vidAsset.id,start:0,end:1,volume:1,transition:'wipex'}]}).catch(e=>e);assert.ok(badTl instanceof Error,'unknown transition must fail');
   q=await latest();
   await call(`/api/projects/${proj.id}`,'PUT',{revision:q.revision,timeline:[{assetId:vidAsset.id,start:0,end:1,volume:1,transition:'fade'},{assetId:vidAsset.id,start:0.5,end:1.5,volume:1}]});
   // 字幕：非法文本被拒；合法保存
@@ -225,6 +225,28 @@ test('真实 HTTP 工作流、版本冲突、Comfy 协议、媒体导入和 FFmp
   const vp=await inspect(vOut);
   assert.equal(vp.width,1080);assert.equal(vp.height,1920);
   console.log('Transitions, subtitles and export presets verified');
+
+  // --- 转场类型扩充：清单暴露 / 混用被拒 / 多转场真实导出 ---
+  const st=await call('/api/state');
+  assert.ok(Array.isArray(st.transitions)&&st.transitions.length>=20,'state must expose transition catalog');
+  assert.ok(st.transitions.some(x=>x.name==='fade'&&x.label),'transition catalog must carry labels');
+  assert.equal(st.defaultTransition,'fade');
+  q=await latest();
+  const mixed=await call(`/api/projects/${proj.id}`,'PUT',{revision:q.revision,timeline:[{assetId:vidAsset.id,start:0,end:1,volume:1,transition:'wipeleft'},{assetId:vidAsset.id,start:0,end:1,volume:1,transition:''},{assetId:vidAsset.id,start:0,end:1,volume:1}]}).catch(e=>e);
+  assert.ok(mixed instanceof Error,'mixed transition/hardcut must fail');
+  q=await latest();
+  await call(`/api/projects/${proj.id}`,'PUT',{revision:q.revision,timeline:[{assetId:vidAsset.id,start:0,end:1,volume:1,transition:'wipeleft'},{assetId:vidAsset.id,start:0,end:1,volume:1,transition:'fadeblack'},{assetId:vidAsset.id,start:0,end:1,volume:1}]});
+  q=await latest();
+  assert.equal(q.timeline[0].transition,'wipeleft');assert.equal(q.timeline[1].transition,'fadeblack');
+  await call(`/api/projects/${proj.id}`,'PUT',{revision:q.revision,subtitles:[]});
+  q=await latest();
+  const renderedW=await wait((await call('/api/jobs','POST',{projectId:proj.id,kind:'export',preset:'720p'})).id);
+  assert.equal(renderedW.status,'succeeded',renderedW.error);
+  const wOut=path.join(folder,'verified-export-wipe.mp4');await writeFile(wOut,Buffer.from(await(await fetch(base+`/media/${renderedW.assetId}`)).arrayBuffer()));
+  const wp=await inspect(wOut);
+  assert.equal(wp.width,1280);assert.equal(wp.height,720);
+  assert.ok(wp.duration>2.4,'multi-transition export should be longer than hard-cut sum');
+  console.log('Transition catalog and multi-transition export verified');
 
   // --- Seed 延续批量：本地后端（comfy/native）允许，且 seed 按镜头序注入 ---
   settings.video={...settings.video,params:{...settings.video.params,steps:8,seed:42}};await call('/api/settings','PUT',settings);

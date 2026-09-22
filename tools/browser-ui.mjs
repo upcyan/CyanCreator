@@ -14,7 +14,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
-import {mkdtemp, mkdir, writeFile, rm} from 'node:fs/promises';
+import {mkdtemp, mkdir, writeFile, readFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -331,6 +331,46 @@ test('浏览器 UI 回归：AI 伴写按钮/弹窗（锚定、滚动同步、挂
     step('edge:refocus-new-field-shows', edge.shownAfterRefocus === true);
     step('edge:follows-new-field', edge.follows === true);
     await evalJs(`(()=>{const f=window.__uitest.field;if(f)f.blur();window.scrollTo(0,0);return 'ok';})()`);
+
+    // --- 8) 后期剪辑：转场下拉（真实交互 + 持久化 + 重载回显）---
+    const ffexe = process.env.FFMPEG_PATH || 'ffmpeg';
+    const clipPath = path.join(workDir, 'clip.mp4');
+    await new Promise((resolve, reject) => {
+      const c = spawn(ffexe, ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24', '-t', '2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', clipPath], {stdio: 'ignore'});
+      c.on('error', reject);
+      c.on('exit', code => code === 0 ? resolve() : reject(new Error('ffmpeg 生成测试视频失败 code=' + code)));
+    });
+    const clipBuf = await readFile(clipPath);
+    const up = await fetch(`${base}/api/assets?projectId=${project.id}&name=transition-clip.mp4`, {method: 'POST', headers: {origin: base, 'x-workspace-token': st.token}, body: clipBuf});
+    assert.equal(up.status, 201, '测试视频上传成功');
+    const clipAsset = await up.json();
+    let cur = await fetch(`${base}/api/state`).then(r => r.json());
+    const proj0 = cur.projects.find(x => x.id === project.id);
+    await fetch(`${base}/api/projects/${project.id}`, {method: 'PUT', headers: authHeaders, body: JSON.stringify({revision: proj0.revision, timeline: [{assetId: clipAsset.id, start: 0, end: 1, volume: 1, transition: 'fade'}, {assetId: clipAsset.id, start: 0, end: 1, volume: 1}]})});
+    const gotoEdit = async () => {
+      await evalJs(`(async()=>{const n=[...document.querySelectorAll('.nav button')].find(b=>b.textContent.includes('后期剪辑'));if(n)n.click();await new Promise(r=>setTimeout(r,650));return 1;})()`);
+      await sleep(650);
+    };
+    await setupViewport(1366, 768, 1);
+    await nav(`http://127.0.0.1:${BASE}/`);
+    await gotoEdit();
+    const selInfo = await evalJs(`(()=>{const s=document.querySelector('.clip [data-field=\"transition\"]');if(!s)return null;const opts=[...s.options].map(o=>({v:o.value,t:o.textContent}));return {count:opts.length,value:s.value,hasHardcut:opts.some(o=>o.v===''),hasLabeled:opts.some(o=>o.v==='fade'&&/交叉|溶解/.test(o.t)),sample:opts.slice(0,4).map(o=>o.v+'='+o.t)};})()`);
+    step('edit:transition-select-rendered', !!selInfo && selInfo.count >= 20 && selInfo.hasHardcut && selInfo.hasLabeled, selInfo ? ('opts=' + selInfo.count + ' value=' + selInfo.value + ' · ' + JSON.stringify(selInfo.sample)) : 'missing');
+    // 真实交互：改下拉 → 触发应用内 save-timeline 代码路径（readTimeline 读取 select.value）
+    await evalJs(`(()=>{const s=document.querySelector('.clip [data-field=\"transition\"]');s.value='wipeleft';s.dispatchEvent(new Event('change',{bubbles:true}));return s.value;})()`);
+    await evalJs(`(()=>{const b=document.createElement('button');b.dataset.action='save-timeline';document.body.appendChild(b);b.click();setTimeout(()=>b.remove(),60);return 'ok';})()`);
+    await sleep(1000);
+    const saved = await fetch(`${base}/api/state`).then(r => r.json());
+    const tlsaved = saved.projects.find(x => x.id === project.id).timeline;
+    step('edit:transition-saved', !!(tlsaved[0] && tlsaved[0].transition === 'wipeleft'), 'transition=' + (tlsaved[0] && tlsaved[0].transition));
+    step('edit:hardcut-last-kept', !tlsaved[1].transition, 'last=' + JSON.stringify(tlsaved[1].transition));
+    // 重载后再进剪辑页：下拉回显持久化值 + 时间线转场标记
+    await nav(`http://127.0.0.1:${BASE}/`);
+    await gotoEdit();
+    const after = await evalJs(`(()=>{const s=document.querySelector('.clip [data-field=\"transition\"]');return {value:s?s.value:null,marker:!!document.querySelector('.timeline-block .tl-fade')};})()`);
+    step('edit:transition-persisted-in-ui', after.value === 'wipeleft', 'select=' + after.value);
+    step('edit:timeline-marker', after.marker === true);
+    await shot('edit-transition.png');
 
     // ===== 汇总 =====
     const total = report.length, pass = report.filter(r => r.ok).length;

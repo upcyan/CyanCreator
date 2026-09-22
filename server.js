@@ -25,6 +25,7 @@ import {Transform, Readable} from 'node:stream';
 import {defaults, requireValue, validateDocument, validateSettings, number} from './lib/core.js';
 import {generateText, comfyVideo, minimaxVideo, probe} from './lib/providers.js';
 import {inspect, render} from './lib/media.js';
+import {normalizeTransition, publicTransitions, DEFAULT_TRANSITION} from './lib/transitions.js';
 import {h3Preset} from './lib/h3.js';
 import {videoPreset, videoFrames} from './lib/video-presets.js';
 import {publicCatalog} from './lib/model-catalog.js';
@@ -69,7 +70,7 @@ const chapterDirectory=p=>p.episodes.map(e=>({id:e.id,title:e.title,chapters:e.c
 // Minimal snapshot: queued jobs only consume writing context, timeline and audio plans.
 // Cloning the full project here used to multiply workspace.json by every queued task.
 const taskSnapshot=p=>structuredClone({name:p.name,activeChapterId:p.activeChapterId,brief:p.brief,bible:p.bible,characters:p.characters,characterRelations:p.characterRelations||[],worldbook:p.worldbook,outline:p.outline,script:p.script,review:p.review,timeline:p.timeline||[],audioTracks:p.audioTracks||[],subtitles:p.subtitles||[],episodes:chapterDirectory(p)});
-const publicState = () => ({...state,projects:state.projects.map(p=>({...p,episodes:chapterDirectory(p)})),storageError:workspaceStore.error,onboarded:!!state.onboarded,cloudTemplates,secrets:secretStatus(), vault:vaultBackend(), videoCapabilities:videoCapabilities(state.settings.video), catalog: publicCatalog(), runtimes: deployments.runtime.status(), deployments: state.deployments.map(({config,...j})=>j), assets: state.assets.map(({file, ...a}) => a), assetUsage: assetUsage(), jobs: state.jobs.map(({snapshot, config, runtimeConfig, guideHistory, ...j}) => j)});
+const publicState = () => ({...state,projects:state.projects.map(p=>({...p,episodes:chapterDirectory(p)})),transitions:publicTransitions(),defaultTransition:DEFAULT_TRANSITION,storageError:workspaceStore.error,onboarded:!!state.onboarded,cloudTemplates,secrets:secretStatus(), vault:vaultBackend(), videoCapabilities:videoCapabilities(state.settings.video), catalog: publicCatalog(), runtimes: deployments.runtime.status(), deployments: state.deployments.map(({config,...j})=>j), assets: state.assets.map(({file, ...a}) => a), assetUsage: assetUsage(), jobs: state.jobs.map(({snapshot, config, runtimeConfig, guideHistory, ...j}) => j)});
 function assetUsage() {
   const usage = {counts: {}, bytes: {}, totalBytes: 0, perAsset: []};
   for (const a of state.assets) {
@@ -439,7 +440,9 @@ export const server = http.createServer(async (req, res) => {
         }
         if ('timeline' in b) {
           requireValue(Array.isArray(b.timeline) && b.timeline.length <= 200, '时间线格式错误');
-          for (const [i,clip] of b.timeline.entries()) {const a = state.assets.find(a => a.id === clip.assetId && a.projectId === p.id); requireValue(a&&!['audio','image'].includes(a.kind), '视频素材不属于本项目'); number(clip.start, 0, a.duration, '入点'); number(clip.end, clip.start + 0.04, a.duration + 0.02, '出点'); number(clip.volume, 0, 2, '音量'); if(clip.transition!==undefined&&clip.transition!==null&&clip.transition!==''&&clip.transition!=='fade')throw Object.assign(new Error('转场仅支持交叉溶解（fade）'),{status:400}); if(clip.transition==='fade'&&i===b.timeline.length-1)throw Object.assign(new Error('转场不能用于最后一个片段'),{status:400}); if(!clip.transition)delete clip.transition;}
+          for (const [i,clip] of b.timeline.entries()) {const a = state.assets.find(a => a.id === clip.assetId && a.projectId === p.id); requireValue(a&&!['audio','image'].includes(a.kind), '视频素材不属于本项目'); number(clip.start, 0, a.duration, '入点'); number(clip.end, clip.start + 0.04, a.duration + 0.02, '出点'); number(clip.volume, 0, 2, '音量'); clip.transition=normalizeTransition(clip.transition); if(clip.transition&&i===b.timeline.length-1)throw Object.assign(new Error('转场不能用于最后一个片段'),{status:400}); if(!clip.transition)delete clip.transition;}
+          const joins=b.timeline.slice(0,-1).map(c=>!!c.transition);
+          if(joins.some(Boolean)&&!joins.every(Boolean))throw Object.assign(new Error('转场需用于所有片段衔接处，或全部使用硬切'),{status:400});
           p.timeline = b.timeline;
         }
         revise(p);

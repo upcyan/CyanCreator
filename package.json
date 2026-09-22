@@ -10,7 +10,7 @@
     "start": "node server.js",
     "test": "node --test",
     "ui": "node --test tools/browser-ui.mjs",
-    "check": "node --check server.js && node --check lib/core.js && node --check lib/providers.js && node --check lib/coach.js && node --check public/app.js && node --check public/coach.js"
+    "check": "node --check server.js && node --check lib/transitions.js && node --check lib/core.js && node --check lib/providers.js && node --check lib/coach.js && node --check public/app.js && node --check public/coach.js"
   },
   "dependencies": {
     "ffmpeg-static": "5.3.0",
