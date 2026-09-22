@@ -250,6 +250,7 @@ export const server = http.createServer(async (req, res) => {
     if(u.pathname==='/updates.js'&&['GET','HEAD'].includes(method)){res.setHeader('Cache-Control','no-store');return serveFile(req,res,path.join(ROOT,'public','updates.js'),'text/javascript; charset=utf-8');}
 
     if(u.pathname==='/api/secrets'&&method==='PUT'){const b=await body(req);await vault.set(b.name,b.value);return json(res,{ok:true,secrets:secretStatus()});}
+    if(u.pathname==='/api/vault/reset'&&method==='POST'){const b=await body(req);requireValue(b&&b.confirm===true,'重置保险库须显式确认（confirm:true）',400);await vault.reset();return json(res,{ok:true,vault:vaultBackend()});}
     if(u.pathname.startsWith('/api/cloud-presets/')&&method==='GET')return json(res,cloudPreset(u.pathname.split('/').at(-1)));
     if(u.pathname==='/api/import-document'&&method==='POST'){const b=await body(req);return json(res,importDocument(b.stage,b.text,b.format));}
     if(u.pathname==='/api/novel-import'&&method==='POST'){
@@ -565,4 +566,4 @@ if(b.kind==='novel-convert'){
     json(res, {error: '接口不存在'}, 404);
   } catch (e) {if (!res.headersSent) json(res, {error: safeError(e)}, e.status || 400); else res.destroy();}
 });
-server.listen(Number(process.env.PORT || 3210), '127.0.0.1', () => console.log(`CyanCreator 0.4.2 · http://127.0.0.1:${server.address().port}`));
+server.listen(Number(process.env.PORT || 3210), '127.0.0.1', () => console.log(`CyanCreator 0.4.3 · http://127.0.0.1:${server.address().port}`));

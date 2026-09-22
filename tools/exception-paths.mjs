@@ -103,6 +103,39 @@ test('异常路径：权限 / 空数据 / 重复提交 / 失败 / 取消 / 依�
       assert.equal((await fetch(`${NB}/api/state`)).status, 200, '依赖缺失时服务须存活可回应');
     } finally { noff.child.kill('SIGKILL'); }
 
+    // 6b) 密钥保险库锁定（密文不可解密）与重置保护
+    const sealedDir = await mkdtemp(path.join(tmpdir(), 'cyan-sealed-'));
+    let sealedChild = null;
+    try {
+      const s1 = await startServer(sealedDir, {CYANCREATOR_VAULT_KEY: 'unit-test-master-key-0123456789abcdef'});
+      sealedChild = s1.child;
+      const t1 = (await j(await fetch(`http://127.0.0.1:${s1.port}/api/state`))).token;
+      const put1 = await fetch(`http://127.0.0.1:${s1.port}/api/secrets`, {method: 'PUT', headers: {'content-type': 'application/json', 'x-workspace-token': t1, origin: `http://127.0.0.1:${s1.port}`}, body: JSON.stringify({name: 'LOCKED_PROBE', value: 'fixture'})});
+      assert.equal(put1.status, 200, '正常主密钥下保存密钥须成功');
+      s1.child.kill('SIGKILL'); sealedChild = null;
+      await sleep(300);
+      // 换一把不匹配的主密钥重启：修复前服务直接崩溃退出，修复后必须存活并报告 sealed
+      const s2 = await startServer(sealedDir, {CYANCREATOR_VAULT_KEY: 'zz-wrong-master-key-0123456789abcdef-0123'});
+      sealedChild = s2.child;
+      const st2 = await j(await fetch(`http://127.0.0.1:${s2.port}/api/state`));
+      assert.equal(st2.vault?.sealed, true, '不可解密时 /api/state 须报告 vault.sealed=true');
+      assert.ok(st2.vault?.error, 'sealed 须带原因文案');
+      const a2 = {'content-type': 'application/json', 'x-workspace-token': st2.token, origin: `http://127.0.0.1:${s2.port}`};
+      const badPut = await fetch(`http://127.0.0.1:${s2.port}/api/secrets`, {method: 'PUT', headers: a2, body: JSON.stringify({name: 'LOCKED_PROBE', value: 'abc'})});
+      assert.equal(badPut.status, 400, '锁定时保存密钥须 400');
+      assert.match((await badPut.json()).error || '', /拒绝保存/, '错误文案须可操作');
+      const noConfirm = await fetch(`http://127.0.0.1:${s2.port}/api/vault/reset`, {method: 'POST', headers: a2, body: '{}'});
+      assert.equal(noConfirm.status, 400, '重置缺 confirm 须 400');
+      const doReset = await fetch(`http://127.0.0.1:${s2.port}/api/vault/reset`, {method: 'POST', headers: a2, body: JSON.stringify({confirm: true})});
+      assert.equal(doReset.status, 200, 'confirm:true 重置须成功');
+      assert.equal((await j(doReset)).vault?.sealed, false, '重置后 sealed=false');
+      const after = await fetch(`http://127.0.0.1:${s2.port}/api/secrets`, {method: 'PUT', headers: a2, body: JSON.stringify({name: 'LOCKED_PROBE', value: 'abc'})});
+      assert.equal(after.status, 200, '重置后保存须恢复可用');
+      const names = await (await import('node:fs/promises')).readdir(path.join(sealedDir, 'secrets'));
+      assert.ok(names.some(n => n.includes('.unreadable-')), '重置后旧密文须改名保留');
+      s2.child.kill('SIGKILL'); sealedChild = null;
+    } finally { if (sealedChild) sealedChild.kill('SIGKILL'); await sleep(200); await rm(sealedDir, {recursive: true, force: true}).catch(() => {}); }
+
     // 7) 持久化
     const ws = JSON.parse(await readFile(path.join(dataDir, 'workspace.json'), 'utf8'));
     for (const k of ['settings', 'projects', 'jobs', 'assets']) assert.ok(k in ws, `workspace.json 须含 ${k}`);

@@ -29,6 +29,34 @@ test('密钥保险库落盘不含明文，重载可用，状态不泄露密钥�
   await vault.set('TEST_CLOUD_KEY','');assert.equal(secretValue('TEST_CLOUD_KEY'),'');
  }finally{if(process.platform!=='win32'){if(savedMaster===undefined)delete process.env.CYANCREATOR_VAULT_KEY;else process.env.CYANCREATOR_VAULT_KEY=savedMaster;}}
 });
+test('保险库密文不可解密时进入锁定：服务可用、保存被拒、重置保留旧密文',async()=>{
+ await mkdir('test-output',{recursive:true});
+ const root=await mkdtemp(path.resolve('test-output/vault-sealed-'));
+ const saved=process.env.CYANCREATOR_VAULT_KEY;
+ try{
+  process.env.CYANCREATOR_VAULT_KEY='unit-test-master-key-0123456789abcdef';
+  const v1=new SecretVault(root);await v1.set('SEALED_PROBE','fixture-value-abcdef');
+  process.env.CYANCREATOR_VAULT_KEY='another-master-key-0123456789abcdef-xyz';
+  const v2=new SecretVault(root);await v2.load();
+  assert.equal(secretValue('SEALED_PROBE'),'','锁定后保险库值不可读');
+  process.env.SEALED_PROBE='env-fallback-abcdef';
+  assert.equal(secretValue('SEALED_PROBE'),'env-fallback-abcdef','锁定后回退同名环境变量');
+  delete process.env.SEALED_PROBE;
+  assert.equal(vaultBackend().sealed,true,'vaultBackend 须报告 sealed');
+  assert.ok(vaultBackend().error,'sealed 须带原因');
+  assert.equal(JSON.stringify(secretStatus()),'[]','锁定状态不得回显密钥清单');
+  await assert.rejects(()=>v2.set('NEW_KEY','abc'),/拒绝保存/,'锁定时保存须被拒绝');
+  await v2.reset();
+  assert.equal(vaultBackend().sealed,false,'重置后解除锁定');
+  await v2.set('REBORN_KEY','fixture-reborn-123456');
+  assert.equal(secretValue('REBORN_KEY'),'fixture-reborn-123456','重置后可重新保存');
+  const {readdir}=await import('node:fs/promises');
+  const names=await readdir(path.join(root,'secrets'));
+  assert.ok(names.includes('vault.enc'),'重置后新密文文件名不变');
+  assert.ok(names.some(n=>n.startsWith('vault.enc.unreadable-')),'旧密文须改名保留');
+ }finally{if(saved===undefined)delete process.env.CYANCREATOR_VAULT_KEY;else process.env.CYANCREATOR_VAULT_KEY=saved;}
+});
+
 test('无可用加密后端时保存给出可操作的报错',async()=>{
  if(process.platform==='win32')return; // Windows 必有 DPAPI
  await mkdir('test-output',{recursive:true});
