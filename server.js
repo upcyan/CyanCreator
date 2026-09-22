@@ -10,7 +10,7 @@ import {guideTurn} from './lib/guide.js';
 import {coachTurn, coachContext} from './lib/coach.js';
 import {applyAgnesPreset} from './lib/agnes-preset.js';
 import {cloudTemplates,cloudPreset,cloudVideo} from './lib/cloud-video.js';
-import {SecretVault,secretStatus,safeError} from './lib/secrets.js';
+import {SecretVault,secretStatus,safeError,vaultBackend} from './lib/secrets.js';
 import {spawn} from 'node:child_process';
 import {inspectUpdate} from './lib/updates.js';
 import {readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, createReadStream, createWriteStream, statSync} from 'node:fs';
@@ -68,7 +68,7 @@ const chapterDirectory=p=>p.episodes.map(e=>({id:e.id,title:e.title,chapters:e.c
 // Minimal snapshot: queued jobs only consume writing context, timeline and audio plans.
 // Cloning the full project here used to multiply workspace.json by every queued task.
 const taskSnapshot=p=>structuredClone({name:p.name,activeChapterId:p.activeChapterId,brief:p.brief,bible:p.bible,characters:p.characters,characterRelations:p.characterRelations||[],worldbook:p.worldbook,outline:p.outline,script:p.script,review:p.review,timeline:p.timeline||[],audioTracks:p.audioTracks||[],subtitles:p.subtitles||[],episodes:chapterDirectory(p)});
-const publicState = () => ({...state,projects:state.projects.map(p=>({...p,episodes:chapterDirectory(p)})),storageError:workspaceStore.error,onboarded:!!state.onboarded,cloudTemplates,secrets:secretStatus(), videoCapabilities:videoCapabilities(state.settings.video), catalog: publicCatalog(), runtimes: deployments.runtime.status(), deployments: state.deployments.map(({config,...j})=>j), assets: state.assets.map(({file, ...a}) => a), assetUsage: assetUsage(), jobs: state.jobs.map(({snapshot, config, runtimeConfig, guideHistory, ...j}) => j)});
+const publicState = () => ({...state,projects:state.projects.map(p=>({...p,episodes:chapterDirectory(p)})),storageError:workspaceStore.error,onboarded:!!state.onboarded,cloudTemplates,secrets:secretStatus(), vault:vaultBackend(), videoCapabilities:videoCapabilities(state.settings.video), catalog: publicCatalog(), runtimes: deployments.runtime.status(), deployments: state.deployments.map(({config,...j})=>j), assets: state.assets.map(({file, ...a}) => a), assetUsage: assetUsage(), jobs: state.jobs.map(({snapshot, config, runtimeConfig, guideHistory, ...j}) => j)});
 function assetUsage() {
   const usage = {counts: {}, bytes: {}, totalBytes: 0, perAsset: []};
   for (const a of state.assets) {
