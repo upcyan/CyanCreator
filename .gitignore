@@ -10,6 +10,9 @@ test-output/
 .env
 .env.*
 
+# Tool telemetry (was accidentally un-ignored in 18e54d8)
+.token-optimizer/
+
 # Logs
 *.log
 test-output/
