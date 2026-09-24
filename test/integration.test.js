@@ -6,10 +6,10 @@ import {mkdtemp, readFile, writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {once} from 'node:events';
 import {setTimeout as delay} from 'node:timers/promises';
-import ffmpeg from 'ffmpeg-static';
-import {run, inspect} from '../lib/media.js';
+import {run, inspect, ffmpegPath} from '../lib/media.js';
 import {mkdir} from 'node:fs/promises';
 
+const ffmpeg=ffmpegPath();
 test('真实 HTTP 工作流、版本冲突、Comfy 协议、媒体导入和 FFmpeg 导出', {timeout:90000}, async t => {
   const root=path.resolve('test-output');await mkdir(root,{recursive:true});const folder=await mkdtemp(path.join(root,'run-'));
   const input=path.join(folder,'sample.mp4');
