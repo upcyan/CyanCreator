@@ -1,12 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdir,mkdtemp,readFile} from 'node:fs/promises';
+import {mkdir,mkdtemp,readFile,writeFile,readdir} from 'node:fs/promises';
 import path from 'node:path';
+import {dpapiAvailable,legacyDpapiBlob} from '../tools/dpapi-fixture.mjs';
 import {initCreation,stashChapter,mutateStructure,importDocument,validateLibrary,shotPrompt,invalidateChapters} from '../lib/creation.js';
 import {splitNovelChapters,importNovel} from '../lib/novel.js';
 
-import {SecretVault,secretValue,secretStatus,safeError,vaultBackend} from '../lib/secrets.js';
+import {SecretVault,secretValue,secretStatus,safeError,vaultBackend,decodeVaultEntries} from '../lib/secrets.js';
 import {cloudPreset,cloudVideo,cloudDuration} from '../lib/cloud-video.js';
+test('Windows 保险库兼容直接 JSON 与旧版 Base64 明文',()=>{
+ const entries={TEST_CLOUD_KEY:{value:'fixture-secret',createdAt:null}};
+ const json=Buffer.from(JSON.stringify(entries));
+ assert.deepEqual(decodeVaultEntries(json,true),entries);
+ assert.deepEqual(decodeVaultEntries(Buffer.from(json.toString('base64')),true),entries);
+ assert.throws(()=>decodeVaultEntries(Buffer.from('not-json'),true));
+});
 test('旧项目迁移与多集章节切换保留独立稿件和视频版本',()=>{
  const p={outline:{logline:'原稿',beats:[{title:'一',summary:'原稿'}]},script:null,stale:{},history:[],scriptVersion:'original'};initCreation(p);const first=p.activeChapterId;mutateStructure(p,{action:'episode',title:'第二集'});assert.equal(p.outline,null);p.outline={logline:'第二集'};stashChapter(p);mutateStructure(p,{action:'switch',id:first});assert.equal(p.outline.logline,'原稿');assert.equal(p.scriptVersion,'original');invalidateChapters(p);assert.equal(p.episodes[1].chapters[0].stale.outline,true);assert.equal(p.episodes.length,2);
 });
@@ -14,8 +22,9 @@ test('文本导入保留内容、拒绝非法 JSON 与角色/镜头字段',()=>{
  const input='# 雨夜\n第一段\n\n第二段\n# 清晨\n第三段';const doc=importDocument('script',input,'text');assert.equal(doc.scenes.length,2);assert.match(doc.scenes[0].action,/第二段/);assert.throws(()=>importDocument('outline','{"beats":[]}','json'));assert.throws(()=>validateLibrary([{name:''}],'characters'));
  const prompt=shotPrompt({prompt:'店门口',direction:{lighting:'逆光',movement:'缓慢推近'},characterIds:['c']},{characters:[{id:'c',name:'林舟',appearance:'绿夹克',personality:'克制'}],worldbook:[{name:'基调',category:'视觉',content:'雨夜暖光'}]});assert.match(prompt,/绿夹克/);assert.match(prompt,/运镜：缓慢推近/);assert.match(prompt,/雨夜暖光/);
 });
-test('密钥保险库落盘不含明文，重载可用，状态不泄露密钥（Windows DPAPI / 其它平台环境变量主密钥）',async()=>{
+test('密钥保险库落盘不含明文，重载可用，状态不泄露密钥（Windows DPAPI / 其它平台环境变量主密钥）',async t=>{
  await mkdir('test-output',{recursive:true});
+ if(process.platform==='win32'&&!(await dpapiAvailable())){t.skip('当前 Windows 账户无法调用 DPAPI Protect');return;}
  if(process.platform==='win32'){assert.equal(vaultBackend().name,'unavailable');} // 尚未探测
  const root=await mkdtemp(path.resolve('test-output/vault-')),vault=new SecretVault(root),value='fixture-secret-not-a-real-key-9ef27';
  const savedMaster=process.env.CYANCREATOR_VAULT_KEY;if(process.platform!=='win32')process.env.CYANCREATOR_VAULT_KEY='unit-test-master-key-0123456789abcdef0123456789abcdef';
@@ -26,6 +35,12 @@ test('密钥保险库落盘不含明文，重载可用，状态不泄露密钥�
   assert.equal(JSON.stringify(secretStatus()).includes(value),false);
   await new SecretVault(root).load();assert.equal(secretValue('TEST_CLOUD_KEY'),value);
   assert.equal(safeError(new Error(value)),'[已隐藏密钥]');
+  if(process.platform==='win32'){
+    await writeFile(vault.file,await legacyDpapiBlob({TEST_CLOUD_KEY:{value,createdAt:null}}));
+    await new SecretVault(root).load();assert.equal(secretValue('TEST_CLOUD_KEY'),value,'旧版双编码密文仍可读取');
+    await vault.set('TEST_CLOUD_KEY',value);
+    await new SecretVault(root).load();assert.equal(secretValue('TEST_CLOUD_KEY'),value,'写入后转为新格式');
+  }
   await vault.set('TEST_CLOUD_KEY','');assert.equal(secretValue('TEST_CLOUD_KEY'),'');
  }finally{if(process.platform!=='win32'){if(savedMaster===undefined)delete process.env.CYANCREATOR_VAULT_KEY;else process.env.CYANCREATOR_VAULT_KEY=savedMaster;}}
 });
@@ -34,9 +49,15 @@ test('保险库密文不可解密时进入锁定：服务可用、保存被拒�
  const root=await mkdtemp(path.resolve('test-output/vault-sealed-'));
  const saved=process.env.CYANCREATOR_VAULT_KEY;
  try{
-  process.env.CYANCREATOR_VAULT_KEY='unit-test-master-key-0123456789abcdef';
-  const v1=new SecretVault(root);await v1.set('SEALED_PROBE','fixture-value-abcdef');
-  process.env.CYANCREATOR_VAULT_KEY='another-master-key-0123456789abcdef-xyz';
+  const v1=new SecretVault(root);
+  if(process.platform==='win32'){
+    await mkdir(path.dirname(v1.file),{recursive:true});
+    await writeFile(v1.file,Buffer.from('unreadable-dpapi-fixture'));
+  }else{
+    process.env.CYANCREATOR_VAULT_KEY='unit-test-master-key-0123456789abcdef';
+    await v1.set('SEALED_PROBE','fixture-value-abcdef');
+    process.env.CYANCREATOR_VAULT_KEY='another-master-key-0123456789abcdef-xyz';
+  }
   const v2=new SecretVault(root);await v2.load();
   assert.equal(secretValue('SEALED_PROBE'),'','锁定后保险库值不可读');
   process.env.SEALED_PROBE='env-fallback-abcdef';
@@ -48,13 +69,15 @@ test('保险库密文不可解密时进入锁定：服务可用、保存被拒�
   await assert.rejects(()=>v2.set('NEW_KEY','abc'),/拒绝保存/,'锁定时保存须被拒绝');
   await v2.reset();
   assert.equal(vaultBackend().sealed,false,'重置后解除锁定');
-  await v2.set('REBORN_KEY','fixture-reborn-123456');
-  assert.equal(secretValue('REBORN_KEY'),'fixture-reborn-123456','重置后可重新保存');
-  const {readdir}=await import('node:fs/promises');
+  if(process.platform!=='win32'){
+    await v2.set('REBORN_KEY','fixture-reborn-123456');
+    assert.equal(secretValue('REBORN_KEY'),'fixture-reborn-123456','重置后可重新保存');
+  }
   const names=await readdir(path.join(root,'secrets'));
-  assert.ok(names.includes('vault.enc'),'重置后新密文文件名不变');
-  assert.ok(names.some(n=>n.startsWith('vault.enc.unreadable-')),'旧密文须改名保留');
- }finally{if(saved===undefined)delete process.env.CYANCREATOR_VAULT_KEY;else process.env.CYANCREATOR_VAULT_KEY=saved;}
+  const filename=path.basename(v2.file);
+  if(process.platform!=='win32')assert.ok(names.includes(filename),'重置后新密文文件名不变');
+  assert.ok(names.some(n=>n.startsWith(filename+'.unreadable-')),'旧密文须改名保留');
+ }finally{delete process.env.SEALED_PROBE;if(saved===undefined)delete process.env.CYANCREATOR_VAULT_KEY;else process.env.CYANCREATOR_VAULT_KEY=saved;}
 });
 
 test('无可用加密后端时保存给出可操作的报错',async()=>{

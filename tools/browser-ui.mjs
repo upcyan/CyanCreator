@@ -89,12 +89,15 @@ async function startServer(dataDir) {
   throw new Error('服务未就绪');
 }
 async function startChrome(cdpPort, profileDir) {
-  const candidates = [process.env.CHROME_PATH, '/usr/local/bin/chromium', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome', 'chromium', 'google-chrome'].filter(Boolean);
+  const windows = ['C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe', 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe', 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'];
+  const unix = ['/usr/local/bin/chromium', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome'];
+  const candidates = [process.env.CHROME_PATH, ...(process.platform==='win32'?windows:unix), 'chromium', 'google-chrome', ...(process.platform==='win32'?['msedge']:[])].filter(Boolean);
   for (const exe of candidates) {
     const child = spawn(exe, ['--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${profileDir}`, 'about:blank'], {stdio: 'ignore'});
-    await sleep(300);
-    if (child.exitCode !== null) continue; // 立即退出（找不到可执行文件等）
+    const started=await new Promise(resolve=>{child.once('spawn',()=>resolve(true));child.once('error',()=>resolve(false));});
+    if(!started)continue;
     for (let i = 0; i < 60; i++) {
+      if(child.exitCode!==null)break;
       try {
         const ver = await fetch(`http://127.0.0.1:${cdpPort}/json/version`);
         if (ver.ok) return {child, wsUrl: (await ver.json()).webSocketDebuggerUrl};
@@ -128,7 +131,7 @@ test('浏览器 UI 回归：AI 伴写按钮/弹窗（锚定、滚动同步、挂
   const chrome = await startChrome(cdpPort, path.join(workDir, 'chrome-profile'));
   if (!chrome) {
     serverProc.kill();
-    t.skip('未找到可用的 Chrome/Chromium（可用 CHROME_PATH 指定）；跳过浏览器 UI 回归');
+    t.skip('未找到可用的 Chrome/Chromium/Edge（可用 CHROME_PATH 指定）；跳过浏览器 UI 回归');
     return;
   }
   const cdp = new CDP(chrome.wsUrl);

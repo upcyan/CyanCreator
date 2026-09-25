@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
-import {mkdtemp, writeFile, readFile, rm} from 'node:fs/promises';
+import {mkdtemp, mkdir, writeFile, readFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -107,15 +107,20 @@ test('异常路径：权限 / 空数据 / 重复提交 / 失败 / 取消 / 依�
     const sealedDir = await mkdtemp(path.join(tmpdir(), 'cyan-sealed-'));
     let sealedChild = null;
     try {
-      const s1 = await startServer(sealedDir, {CYANCREATOR_VAULT_KEY: 'unit-test-master-key-0123456789abcdef'});
-      sealedChild = s1.child;
-      const t1 = (await j(await fetch(`http://127.0.0.1:${s1.port}/api/state`))).token;
-      const put1 = await fetch(`http://127.0.0.1:${s1.port}/api/secrets`, {method: 'PUT', headers: {'content-type': 'application/json', 'x-workspace-token': t1, origin: `http://127.0.0.1:${s1.port}`}, body: JSON.stringify({name: 'LOCKED_PROBE', value: 'fixture'})});
-      assert.equal(put1.status, 200, '正常主密钥下保存密钥须成功');
-      s1.child.kill('SIGKILL'); sealedChild = null;
-      await sleep(300);
-      // 换一把不匹配的主密钥重启：修复前服务直接崩溃退出，修复后必须存活并报告 sealed
-      const s2 = await startServer(sealedDir, {CYANCREATOR_VAULT_KEY: 'zz-wrong-master-key-0123456789abcdef-0123'});
+      if(process.platform==='win32'){
+        const folder=path.join(sealedDir,'secrets');await mkdir(folder,{recursive:true});
+        await writeFile(path.join(folder,'vault.dpapi'),Buffer.from('unreadable-dpapi-fixture'));
+      }else{
+        const s1 = await startServer(sealedDir, {CYANCREATOR_VAULT_KEY: 'unit-test-master-key-0123456789abcdef'});
+        sealedChild = s1.child;
+        const t1 = (await j(await fetch(`http://127.0.0.1:${s1.port}/api/state`))).token;
+        const put1 = await fetch(`http://127.0.0.1:${s1.port}/api/secrets`, {method: 'PUT', headers: {'content-type': 'application/json', 'x-workspace-token': t1, origin: `http://127.0.0.1:${s1.port}`}, body: JSON.stringify({name: 'LOCKED_PROBE', value: 'fixture'})});
+        assert.equal(put1.status, 200, '正常主密钥下保存密钥须成功');
+        s1.child.kill('SIGKILL'); sealedChild = null;
+        await sleep(300);
+      }
+      // Windows 用损坏密文，其他平台更换主密钥；服务都必须存活并报告 sealed。
+      const s2 = await startServer(sealedDir, process.platform==='win32'?{}:{CYANCREATOR_VAULT_KEY: 'zz-wrong-master-key-0123456789abcdef-0123'});
       sealedChild = s2.child;
       const st2 = await j(await fetch(`http://127.0.0.1:${s2.port}/api/state`));
       assert.equal(st2.vault?.sealed, true, '不可解密时 /api/state 须报告 vault.sealed=true');
@@ -129,8 +134,10 @@ test('异常路径：权限 / 空数据 / 重复提交 / 失败 / 取消 / 依�
       const doReset = await fetch(`http://127.0.0.1:${s2.port}/api/vault/reset`, {method: 'POST', headers: a2, body: JSON.stringify({confirm: true})});
       assert.equal(doReset.status, 200, 'confirm:true 重置须成功');
       assert.equal((await j(doReset)).vault?.sealed, false, '重置后 sealed=false');
-      const after = await fetch(`http://127.0.0.1:${s2.port}/api/secrets`, {method: 'PUT', headers: a2, body: JSON.stringify({name: 'LOCKED_PROBE', value: 'abc'})});
-      assert.equal(after.status, 200, '重置后保存须恢复可用');
+      if(process.platform!=='win32'){
+        const after = await fetch(`http://127.0.0.1:${s2.port}/api/secrets`, {method: 'PUT', headers: a2, body: JSON.stringify({name: 'LOCKED_PROBE', value: 'abc'})});
+        assert.equal(after.status, 200, '重置后保存须恢复可用');
+      }
       const names = await (await import('node:fs/promises')).readdir(path.join(sealedDir, 'secrets'));
       assert.ok(names.some(n => n.includes('.unreadable-')), '重置后旧密文须改名保留');
       s2.child.kill('SIGKILL'); sealedChild = null;
