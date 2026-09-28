@@ -1,7 +1,7 @@
 import {coachRender,coachHandle,coachBoot} from './coach.js';
 import {imageSettings,readImage} from './character-images.js';
 import {audioPanel,speechSettings,readSpeech,speechTemplate,readTracks,setDialogue} from './audio-panel.js';
-import {creationEditor,proposalPreview,captureDocument,editStructure,replaceDraft,libraryRow,readLibrary,readRelations,appendPhaseRow,removePhaseRow,addRelationRow,removeRelationRow,addOutfitRow,setCharFilter,toggleCanvas,storyboardCanvas,moveStoryboardShot} from './creation-editor.js';
+import {creationEditor,proposalPreview,captureDocument,editStructure,replaceDraft,libraryRow,readLibrary,readRelations,readIdeas,appendPhaseRow,removePhaseRow,addRelationRow,removeRelationRow,addOutfitRow,setCharFilter,toggleCanvas,storyboardCanvas,moveStoryboardShot} from './creation-editor.js';
 import {settingsExtras,cloudTemplatesView,cloudSettings,readCloud,agnesBannerView,geminiBannerView,mimoBannerView,arkBannerView,zhipuBannerView,sfBannerView,secretPendingHtml,secretUsage,secretRowsHtml} from './settings-extra.js';
 import {updatePanel,handleUpdate} from './updates.js';
 import {videoWorkbench, shotProgress, readShot, flatShots, pickedShots, comparePick, compareList, compareClear} from './video-workbench.js';
@@ -14,10 +14,13 @@ const names = {coach:'引导助手',outline:'故事大纲', script:'剧本分镜
 const statuses = {queued:'排队中', running:'执行中', succeeded:'已完成', failed:'失败', cancelled:'已取消', interrupted:'执行中断'};
 const voiceDrafts=new Map();
 const countLabel = n => n > 99 ? '99+' : String(n);
-let videoKey='0-0'; let deploymentDirty=false; let state, projectId = localStorage.getItem('projectId'), page = 'outline', editor = false, dirty = false, previewId = '', timer, canvasMode = false;
+let videoKey='0-0'; let deploymentDirty=false; let state, projectId = localStorage.getItem('projectId'), page = 'outline', editor = false, dirty = false, previewId = '', timer, canvasMode = false, ideaFilter = {status: 'all', text: ''};
 function toast(message) {$('#toast').textContent = message; $('#toast').style.display = 'block'; clearTimeout(timer); timer = setTimeout(() => $('#toast').style.display = 'none', 6000);}
+const SESSION_HEADER_NAME = 'X-Workspace-Token';
 async function api(url, method = 'GET', data) {
-  let r;try{r = await fetch(url, {method, headers: {'Content-Type':'application/json', 'X-Workspace-Token':state?.token || ''}, ...(data === undefined ? {} : {body: JSON.stringify(data)}),signal:AbortSignal.timeout(15000)});}catch{throw new Error('工作台服务未响应，请检查服务是否仍在运行。取消尚未确认；恢复连接后可再次取消，勿重复提交生成任务。');}
+  const headers = {'Content-Type': 'application/json'};
+  if (state?.token) headers[SESSION_HEADER_NAME] = state?.token;
+  let r;try{r = await fetch(url, {method, headers, ...(data === undefined ? {} : {body: JSON.stringify(data)}),signal:AbortSignal.timeout(15000)});}catch{throw new Error('工作台服务未响应，请检查服务是否仍在运行。取消尚未确认；恢复连接后可再次取消，勿重复提交生成任务。');}
   const result = await r.json(); if (!r.ok) throw new Error(result.error || '请求失败'); return result;
 }
 function project() {return state.projects.find(p => p.id === projectId);}
@@ -286,15 +289,21 @@ if(action==='video-preview-preset'){for(const [key,value] of Object.entries({ste
 
   if(action==='canvas-toggle'){toggleShotCanvas();render();return;}
   if(action==='canvas-open-shot'){videoKey=el.dataset.key;if(canvasActive())toggleShotCanvas();render();return;}
-  if(action.startsWith('creation-')||action==='storyboard-mode'||action==='sb-generate'||action==='rel-add'||action==='rel-remove'){
+  if(action.startsWith('creation-')||action==='storyboard-mode'||action==='sb-generate'||action==='rel-add'||action==='rel-remove'||action==='rel-add-for'||action==='idea-quick-add'||action==='idea-remove'||action==='idea-save'||action==='idea-filter'||action==='creation-worldbook'){
  if(action==='char-avatar'){const card=el.closest('[data-library-row]');const hidden=card?.querySelector('[data-avatar-asset]');if(!hidden)throw new Error('未找到头像位');hidden.value=el.dataset.id;dirty=true;toast('头像已选择，保存稿件后生效并更新关系图谱');return;}
  if(action==='outfit-add'){addOutfitRow(el.dataset.char);dirty=true;return;}
  if(action==='outfit-remove'){el.closest('[data-outfit-row]')?.remove();dirty=true;return;}
  if(action==='creation-phase-add'){appendPhaseRow(el.dataset.char,project());dirty=true;return;}
  if(action==='creation-phase-remove'){el.closest('.phase-row')?.remove();dirty=true;return;}
  if(action==='rel-add'){addRelationRow(project());dirty=true;return;}
+ if(action==='rel-add-for'){const cid=el.dataset.char;const host=document.getElementById('rel-rows');if(!host){toast('请先在大纲页「关系图谱」面板展开后添加');return;}if(dirty)await saveCreation();addRelationRow(project(),{from:cid});dirty=true;const row=host.querySelector('[data-rel-row]:last-child [data-rel-from]');if(row){row.value=cid;row.closest('[data-rel-row]').scrollIntoView({block:'center'});}toast('已预填角色 A，请选择关系与角色 B 后保存');return;}
  if(action==='rel-remove'){el.closest('[data-rel-row]')?.remove();dirty=true;return;}
- if(action==='char-filter'){if(dirty){toast('请先保存修改，再筛选');return;}setCharFilter(el.dataset.group);render();return;}
+ if(action==='char-filter'){const g=el.dataset.group;setCharFilter(g);document.querySelectorAll('[data-library="characters"] [data-library-row]').forEach(card=>{const sel=card.querySelector('[data-cast-group]');card.hidden=g!=='all'&&(!sel||sel.value!==g);});document.querySelectorAll('[data-char-filter]').forEach(btn=>btn.classList.toggle('active',btn.dataset.charFilter===g));return;}
+ if(action==='idea-filter'){ideaFilter.status=el.dataset.status;render();return;}
+ if(action==='idea-quick-add'){const input=document.getElementById('idea-quick-input');const text=(input?.value||'').trim();if(!text)throw new Error('先写点想法再记录');if(dirty)await saveCreation();const p=project();const idea={id:crypto.randomUUID(),content:text,status:'new',tag:'',chapterId:p.activeChapterId,createdAt:new Date().toISOString()};await saveProject({ideas:[...(p.ideas||[]),idea]});if(input)input.value='';toast('闪念已记录');return;}
+ if(action==='idea-remove'){const id=el.dataset.id;if(dirty)await saveCreation();const p=project();await saveProject({ideas:(p.ideas||[]).filter(x=>x.id!==id)});toast('闪念已移除');return;}
+ if(action==='idea-save'){await saveCreation();toast('闪念已保存');return;}
+ if(action==='creation-worldbook'){if(dirty)throw new Error('请先保存当前章节草稿');const instruction=($('#worldbook-gen-instruction')?.value||'').trim()||'依据创作简报、故事设定与角色，补充世界观设定（规则、地点、历史等），不与已有条目重复';await api('/api/jobs','POST',{projectId,kind:'assist',stage:'worldbook',mode:'世界观设定',instruction});await refresh();toast('世界观设定生成中，完成后在「伴写候选」应用');return;}
     if(action==='storyboard-mode'){const active=toggleCanvas(project());canvasMode=active;render();toast(active?'已进入画布模式：拖拽卡片编排分镜':'已切换到列表模式');return;}
     if(action==='sb-generate'){if(dirty){await saveCreation();toast('草稿已先保存');}const si=Number(el.dataset.scene),sj=Number(el.dataset.shot);await api('/api/jobs','POST',{projectId,kind:'video',scene:si,shot:sj});await refresh();toast(`镜头 ${si+1}.${sj+1} 已加入生成队列`);return;}
     if(['creation-add','creation-remove','creation-move','creation-shot-add','creation-shot-remove','creation-shot-move'].includes(action)){editStructure(action,el,project());dirty=true;return;}
@@ -410,7 +419,8 @@ if(action==='video-preview-preset'){for(const [key,value] of Object.entries({ste
   else if(['move-up','move-down','remove-clip'].includes(action)) {readTimeline();const arr=project().timeline,i=Number(el.dataset.index);if(action==='remove-clip')arr.splice(i,1);else {const next=i+(action==='move-up'?-1:1);if(next>=0&&next<arr.length)[arr[i],arr[next]]=[arr[next],arr[i]];}await saveProject({audioTracks:readTracks(project()),timeline:arr});}
   else if(action==='preview') {readTimeline();previewId=el.dataset.id;render();}
 }
-async function saveCreation(){const value=captureDocument(),empty=page==='outline'?!value.logline&&!value.beats.some(b=>b.title||b.summary):!value.scenes.some(s=>s.title||s.action||s.dialogue||s.shots.some(x=>x.prompt));const libChars=document.querySelector('[data-library="characters"] [data-library-row]');await api('/api/projects/'+projectId+'/draft','POST',{revision:project().revision,stage:page,value:empty?null:value,brief:$('#brief')?.value??project().brief,bible:$('#bible')?.value??project().bible,characters:libChars?readLibrary('characters'):project().characters,worldbook:libChars?readLibrary('worldbook'):project().worldbook,...(page==='outline'&&document.getElementById('rel-rows')?{relations:readRelations()}:{}),...(libChars?{}:{})});dirty=false;await refresh();toast('章节与共享设定已保存');}
+async function saveCreation(){const value=captureDocument(),empty=page==='outline'?!value.logline&&!value.beats.some(b=>b.title||b.summary):!value.scenes.some(s=>s.title||s.action||s.dialogue||s.shots.some(x=>x.prompt));const libChars=document.querySelector('[data-library="characters"] [data-library-row]');const ideaRows=document.getElementById('idea-rows');const ideas=ideaRows?mergeIdeas(project().ideas,readIdeas()):project().ideas;await api('/api/projects/'+projectId+'/draft','POST',{revision:project().revision,stage:page,value:empty?null:value,brief:$('#brief')?.value??project().brief,bible:$('#bible')?.value??project().bible,characters:libChars?readLibrary('characters'):project().characters,worldbook:libChars?readLibrary('worldbook'):project().worldbook,ideas,...(page==='outline'&&document.getElementById('rel-rows')?{relations:readRelations()}:{})});dirty=false;await refresh();toast('章节与共享设定已保存');}
+function mergeIdeas(existing,edited){const byId=new Map((existing||[]).map(x=>[x.id,x]));return edited.map(x=>{const old=byId.get(x.id)||{};return {id:x.id,content:x.content,status:x.status,tag:x.tag,chapterId:x.chapterId,createdAt:old.createdAt||new Date().toISOString()};}).concat((existing||[]).filter(x=>!edited.some(e=>e.id===x.id)));}
 function fmtSRT(t){const h=Math.floor(t/3600),m=Math.floor(t%3600/60),sec=Math.floor(t%60),ms=Math.round(t%1*1000);return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')},${String(ms).padStart(3,'0')}`;}
 function srtText(subs){return subs.map(s=>`${s.start} ${s.end} ${s.text.replace(/\n/g,' ')}`).join('\n');}
 function toSRT(subs){return subs.map((s,i)=>`${i+1}\n${fmtSRT(s.start)} --> ${fmtSRT(s.end)}\n${s.text}`).join('\n\n')+'\n';}
@@ -473,6 +483,8 @@ async function applyOrganizer(p){
   await api('/api/projects/'+projectId+'/structure','POST',{revision:p.revision,action:'chapter-reorder',order});
 }
 document.addEventListener('click',async e=>{const el=e.target.closest('[data-action]');if(!el)return;el.disabled=true;try{await handle(el.dataset.action,el);}catch(err){toast(err.message);}finally{el.disabled=false;}});
+document.addEventListener('click',e=>{const node=e.target.closest&&e.target.closest('[data-graph-node]');if(!node)return;const cid=node.dataset.graphNode;const card=document.querySelector(`[data-library-row="${cid}"]`);if(!card){toast('未找到该角色卡片');return;}const details=card.closest('details.panel');if(details)details.open=true;card.scrollIntoView({behavior:'smooth',block:'center'});card.classList.add('clip-flash');setTimeout(()=>card.classList.remove('clip-flash'),1600);});
+document.addEventListener('keydown',e=>{if(e.target&&e.target.id==='idea-quick-input'&&e.key==='Enter'){e.preventDefault();const btn=document.querySelector('[data-action="idea-quick-add"]');if(btn)btn.click();}});
 let sbDrag=null;
 let tlDrag=null;
 document.addEventListener('dragstart',e=>{const el=e.target.closest&&e.target.closest('[data-tl-block],[data-tl-clip]');if(el){tlDrag=el.dataset.tlBlock??el.dataset.tlClip;el.classList.add('sb-dragging');e.dataTransfer.effectAllowed='move';}});
@@ -518,7 +530,7 @@ document.addEventListener('drop',e=>{
 document.addEventListener('input',e=>{if(e.target.id==='secret-search'){secretSearch=e.target.value;renderSecretList();}if(e.target.dataset.voiceText!==undefined)voiceDrafts.set(e.target.dataset.voiceText,e.target.value);if(e.target.matches('[data-deploy-config]'))deploymentDirty=true;if(e.target.closest('#app')&&e.target.id!=='project-select'&&!e.target.matches('[data-transient],[data-editor-nav]')&&e.target.type!=='file'&&!e.target.matches('[data-shot-pick]')&&!e.target.matches('[data-deploy-config]')){dirty=true;const status=$('.form-status');if(status)status.textContent='有未保存修改';if(page==='models'){const ha=$('.heading-actions');if(ha&&!ha.querySelector('[data-action="save-settings"]'))ha.insertAdjacentHTML('afterbegin',button('保存设置','save-settings','primary'));}}});
 document.addEventListener('change',async e=>{
   try {
-    if(e.target.dataset.characterImport){if(dirty)throw new Error('请先保存角色');const file=e.target.files[0];if(!file)return;if(file.size>20*1024*1024)throw new Error('参考图不能超过 20MB');const r=await fetch('/api/assets?'+new URLSearchParams({projectId,characterId:e.target.dataset.characterImport,name:file.name,kind:'image'}),{method:'POST',headers:{'X-Workspace-Token':state.token},body:file});const result=await r.json();if(!r.ok)throw new Error(result.error);e.target.value='';await refresh();toast('参考图已导入，请在角色卡片中选为参考');return;}
+    if(e.target.dataset.characterImport){if(dirty)throw new Error('请先保存角色');const file=e.target.files[0];if(!file)return;if(file.size>20*1024*1024)throw new Error('参考图不能超过 20MB');const h={'Content-Type':file.type||'application/octet-stream'};if(state?.token)h[SESSION_HEADER_NAME]=state?.token;const r=await fetch('/api/assets?'+new URLSearchParams({projectId,characterId:e.target.dataset.characterImport,name:file.name,kind:'image'}),{method:'POST',headers:h,body:file});const result=await r.json();if(!r.ok)throw new Error(result.error);e.target.value='';await refresh();toast('参考图已导入，请在角色卡片中选为参考');return;}
     if(e.target.id==='chapter-select'){if(dirty){e.target.value=project().activeChapterId;throw new Error('请先保存当前章节');}await api('/api/projects/'+projectId+'/structure','POST',{revision:project().revision,action:'switch',id:e.target.value});await refresh();return;}
     if(e.target.id==='creation-import'){const file=e.target.files[0];if(!file)return;if(dirty)throw new Error('请先保存当前草稿再导入');if(file.size>1024*1024)throw new Error('文件不能超过 1MB');const value=await api('/api/import-document','POST',{stage:page,text:await file.text(),format:file.name.toLowerCase().endsWith('.json')?'json':'text'});replaceDraft(value,project());dirty=true;toast('已导入预览，请检查后保存');return;}
     if(e.target.id==='stage-image-provider'){const base=document.getElementById('stage-image-base');if(e.target.value==='automatic1111')base.value='http://127.0.0.1:7860';else if(e.target.value==='agnes')base.value='https://api.agnes.ai/v1';return;}
@@ -538,7 +550,7 @@ document.addEventListener('change',async e=>{
     if(e.target.id==='shot-last-frame'){if(dirty)throw new Error('请先保存当前修改');const key=videoKey,si=Number(key.split('-')[0]),i=Number(key.split('-')[1]||0);await saveProject(e.target.value?{__lastFrame:{scene:si,shot:i,assetId:e.target.value}}:{__clearLastFrame:{scene:si,shot:i}});toast(e.target.value?'尾帧已保存，生成时将作为视频最后一帧':'已清除尾帧');return;}
     if(e.target.id==='export-preset'){if(dirty)throw new Error('请先保存当前修改');await saveProject({exportPreset:e.target.value});toast('导出档位已保存');return;}
     if(e.target.id==='video-provider'){ $('#video-url').value=e.target.value==='comfy'?'http://127.0.0.1:8188':'https://api.minimax.io/v1';$('#video-model').value=e.target.value==='comfy'?'自定义视频工作流':'MiniMax-Hailuo-2.3';$('#video-key').value=e.target.value==='comfy'?'':'MINIMAX_API_KEY';dirty=true;}
-    if(e.target.id==='upload'||e.target.id==='audio-import'){if(dirty)throw new Error('请先保存当前修改');const file=e.target.files[0];if(!file)return;if(file.size>512*1024*1024)throw new Error('素材不能超过 512MB');toast('正在导入并分析视频…');const r=await fetch(`/api/assets?${new URLSearchParams({projectId,name:file.name,kind:e.target.id==='audio-import'?'audio':'video'})}`,{method:'POST',headers:{'X-Workspace-Token':state.token},body:file});const result=await r.json();if(!r.ok)throw new Error(result.error);await refresh();toast('素材已导入');}
+    if(e.target.id==='upload'||e.target.id==='audio-import'){if(dirty)throw new Error('请先保存当前修改');const file=e.target.files[0];if(!file)return;if(file.size>512*1024*1024)throw new Error('素材不能超过 512MB');toast('正在导入并分析视频…');const h={'Content-Type':file.type||'application/octet-stream'};if(state?.token)h[SESSION_HEADER_NAME]=state?.token;const r=await fetch(`/api/assets?${new URLSearchParams({projectId,name:file.name,kind:e.target.id==='audio-import'?'audio':'video'})}`,{method:'POST',headers:h,body:file});const result=await r.json();if(!r.ok)throw new Error(result.error);await refresh();toast('素材已导入');}
   }catch(err){toast(err.message);}
 });
 $('#close-modal').onclick=()=>$('#modal').close();

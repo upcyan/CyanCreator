@@ -4,7 +4,7 @@ import {imageDefaults,validateImage,inspectImage,portraitPrompt,generateImage} f
 import {SpeechRuntime,speechDefaults,validateSpeech,cloudSpeech} from './lib/speech.js';
 import {inspectAudio,validateTracks} from './lib/audio.js';
 import http from 'node:http';
-import {initCreation,stashChapter,invalidateChapters,mutateStructure,importDocument,validateLibrary,validateRelations,shotPrompt,validateDirection} from './lib/creation.js';
+import {initCreation,stashChapter,invalidateChapters,mutateStructure,importDocument,validateLibrary,validateRelations,validateIdeas,shotPrompt,validateDirection} from './lib/creation.js';
 import {importNovel,novelToScript,NOVEL_MAX_CHAPTERS,NOVEL_SOURCE_LIMIT} from './lib/novel.js';
 import {assistText} from './lib/assist.js';
 import {guideTurn} from './lib/guide.js';
@@ -69,7 +69,7 @@ const projectById = id => {const p = state.projects.find(p => p.id === id); requ
 const chapterDirectory=p=>p.episodes.map(e=>({id:e.id,title:e.title,chapters:e.chapters.map(c=>({id:c.id,title:c.title}))}));
 // Minimal snapshot: queued jobs only consume writing context, timeline and audio plans.
 // Cloning the full project here used to multiply workspace.json by every queued task.
-const taskSnapshot=p=>structuredClone({name:p.name,activeChapterId:p.activeChapterId,brief:p.brief,bible:p.bible,characters:p.characters,characterRelations:p.characterRelations||[],worldbook:p.worldbook,outline:p.outline,script:p.script,review:p.review,timeline:p.timeline||[],audioTracks:p.audioTracks||[],subtitles:p.subtitles||[],episodes:chapterDirectory(p)});
+const taskSnapshot=p=>structuredClone({name:p.name,activeChapterId:p.activeChapterId,brief:p.brief,bible:p.bible,characters:p.characters,characterRelations:p.characterRelations||[],worldbook:p.worldbook,ideas:p.ideas||[],outline:p.outline,script:p.script,review:p.review,timeline:p.timeline||[],audioTracks:p.audioTracks||[],subtitles:p.subtitles||[],episodes:chapterDirectory(p)});
 const publicState = () => ({...state,projects:state.projects.map(p=>({...p,episodes:chapterDirectory(p)})),transitions:publicTransitions(),defaultTransition:DEFAULT_TRANSITION,storageError:workspaceStore.error,onboarded:!!state.onboarded,cloudTemplates,secrets:secretStatus(), vault:vaultBackend(), videoCapabilities:videoCapabilities(state.settings.video), catalog: publicCatalog(), runtimes: deployments.runtime.status(), deployments: state.deployments.map(({config,...j})=>j), assets: state.assets.map(({file, ...a}) => a), assetUsage: assetUsage(), jobs: state.jobs.map(({snapshot, config, runtimeConfig, guideHistory, ...j}) => j)});
 function assetUsage() {
   const usage = {counts: {}, bytes: {}, totalBytes: 0, perAsset: []};
@@ -268,8 +268,9 @@ export const server = http.createServer(async (req, res) => {
       else {
         for(const key of ['brief','bible']){requireValue(typeof b[key]==='string'&&b[key].length<=50000,'设定文字过长');if(b[key]!==p[key])invalidateChapters(p);p[key]=b[key];}
         const characters=validateLibrary(b.characters,'characters'),worldbook=validateLibrary(b.worldbook,'worldbook'),relations=validateRelations(b.relations??p.characterRelations,characters.map(c=>c.id));
+        const ideas=validateIdeas(b.ideas??p.ideas,p.episodes.flatMap(e=>e.chapters).map(x=>x.id));
         if(JSON.stringify(characters)!==JSON.stringify(p.characters)||JSON.stringify(worldbook)!==JSON.stringify(p.worldbook)||JSON.stringify(relations)!==JSON.stringify(p.characterRelations||[]))invalidateChapters(p);
-        p.characters=characters;p.worldbook=worldbook;p.characterRelations=relations;
+        p.characters=characters;p.worldbook=worldbook;p.characterRelations=relations;p.ideas=ideas;
         if(b.value){requireValue(['outline','script'].includes(b.stage),'无效阶段');if(b.stage==='script')for(const scene of b.value.scenes||[])for(const shot of scene.shots||[])validateDirection(shot);if(JSON.stringify(b.value)!==JSON.stringify(p[b.stage])||p.stale[b.stage])applyDocument(p,b.stage,validateDocument(b.stage,b.value));}
       }
       revise(p);Object.assign(original,p);persist();return json(res,p);
@@ -538,7 +539,7 @@ if(b.kind==='novel-convert'){
         job.novelConvert={source:b.source,chapterTitle:String(b.chapterTitle||'').slice(0,120),instruction:String(b.instruction||'').slice(0,2000)};
         job.config=structuredClone(resolveTextConfig(state.settings.text,'script'));
       }
-      if(b.kind==='assist'){requireValue(['outline','script','characters'].includes(b.stage)&&typeof b.instruction==='string'&&b.instruction.length<=10000,'伴写要求无效');job.assist={stage:b.stage,mode:String(b.mode||'续写').slice(0,100),instruction:b.instruction};job.config=structuredClone(resolveTextConfig(state.settings.text,b.stage==='outline'?'outline':'script'));if(b.profileId){const altProfile=state.settings.text.profiles.find(p=>p.id===b.profileId);if(altProfile)Object.assign(job.config,{baseUrl:altProfile.baseUrl,model:altProfile.model,keyEnv:altProfile.keyEnv});}}
+      if(b.kind==='assist'){requireValue(['outline','script','characters','worldbook'].includes(b.stage)&&typeof b.instruction==='string'&&b.instruction.length<=10000,'伴写要求无效');job.assist={stage:b.stage,mode:String(b.mode||'续写').slice(0,100),instruction:b.instruction};job.config=structuredClone(resolveTextConfig(state.settings.text,b.stage==='outline'?'outline':'script'));if(b.profileId){const altProfile=state.settings.text.profiles.find(p=>p.id===b.profileId);if(altProfile)Object.assign(job.config,{baseUrl:altProfile.baseUrl,model:altProfile.model,keyEnv:altProfile.keyEnv});}}
       if (b.kind === 'video') {
         Object.assign(job,videoJob(p,b));
       }
@@ -555,7 +556,7 @@ if(b.kind==='novel-convert'){
         requireValue(job.status === 'succeeded' && job.result && !job.applied, '没有可应用的结果');
         requireValue(b.revision === p.revision, '项目已变化，请刷新后重试', 409);
         requireValue(!job.chapterId||job.chapterId===p.activeChapterId,'请先切换到任务所属章节');
-        if(job.kind==='novel-convert'){requireValue(job.result?.script?.scenes?.length,'转换稿为空');const doc=validateDocument('script',job.result.script);for(const s of doc.scenes||[])for(const shot of s.shots||[])validateDirection(shot);applyDocument(p,'script',doc);}else if(job.kind==='guide'){requireValue(job.result.candidate&&['outline','script'].includes(job.guide.stage),'此回复没有可应用的稿件');requireValue(p.revision===job.baseRevision,'生成后稿件已修改，请基于最新稿件重新整理候选',409);applyDocument(p,job.guide.stage,job.result.candidate);}else if(job.kind==='assist'&&job.assist.stage==='characters'){p.characters=validateLibrary([...p.characters,...job.result.characters],'characters');invalidateChapters(p);revise(p);}else applyDocument(p,job.kind==='assist'?job.assist.stage:job.kind,job.result);job.applied=true;
+        if(job.kind==='novel-convert'){requireValue(job.result?.script?.scenes?.length,'转换稿为空');const doc=validateDocument('script',job.result.script);for(const s of doc.scenes||[])for(const shot of s.shots||[])validateDirection(shot);applyDocument(p,'script',doc);}else if(job.kind==='guide'){requireValue(job.result.candidate&&['outline','script'].includes(job.guide.stage),'此回复没有可应用的稿件');requireValue(p.revision===job.baseRevision,'生成后稿件已修改，请基于最新稿件重新整理候选',409);applyDocument(p,job.guide.stage,job.result.candidate);}else if(job.kind==='assist'&&job.assist.stage==='characters'){p.characters=validateLibrary([...p.characters,...job.result.characters],'characters');invalidateChapters(p);revise(p);}else if(job.kind==='assist'&&job.assist.stage==='worldbook'){p.worldbook=validateLibrary([...p.worldbook,...job.result.worldbook],'worldbook');invalidateChapters(p);revise(p);}else applyDocument(p,job.kind==='assist'?job.assist.stage:job.kind,job.result);job.applied=true;
       }
       persist(); return json(res, {ok: true});
     }
