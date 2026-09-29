@@ -97,6 +97,11 @@ test('创作 HTTP：闪念持久化、缺省保留、非法章节拒绝、世界
   // 2. 缺省 ideas 的 draft 不得丢闪念
   await call('/api/projects/'+p.id+'/draft','POST',{revision:p.revision,stage:'outline',value:null,brief:'新简报',bible:'',characters:[],worldbook:[]});
   p=await latest();assert.equal(p.ideas.length,1);
+  // 2.5 PUT 项目接口同样持久化闪念（闪念快速记录/移除走 saveProject → PUT），非法章节同样拒绝
+  await call('/api/projects/'+p.id,'PUT',{revision:p.revision,ideas:[...p.ideas,{id:'i2',content:'通过 PUT 追加的闪念',status:'new',tag:'',chapterId,createdAt:'2026-09-29T00:00:00Z'}]});
+  p=await latest();assert.equal(p.ideas.length,2);assert.equal(p.ideas[1].content,'通过 PUT 追加的闪念');
+  await call('/api/projects/'+p.id,'PUT',{revision:p.revision,ideas:[{content:'x',chapterId:'ghost'}]},400);
+  p=await latest();assert.equal(p.ideas.length,2);
   // 3. 非法章节归属拒绝
   await call('/api/projects/'+p.id+'/draft','POST',{revision:p.revision,stage:'outline',value:null,brief:'',bible:'',characters:[],worldbook:[],ideas:[{content:'x',chapterId:'ghost'}]},400);
   // 4. 世界观伴写候选：应用后合并进世界书

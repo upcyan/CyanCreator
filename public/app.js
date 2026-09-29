@@ -1,7 +1,7 @@
 import {coachRender,coachHandle,coachBoot} from './coach.js';
 import {imageSettings,readImage} from './character-images.js';
 import {audioPanel,speechSettings,readSpeech,speechTemplate,readTracks,setDialogue} from './audio-panel.js';
-import {creationEditor,proposalPreview,captureDocument,editStructure,replaceDraft,libraryRow,readLibrary,readRelations,readIdeas,appendPhaseRow,removePhaseRow,addRelationRow,removeRelationRow,addOutfitRow,setCharFilter,toggleCanvas,storyboardCanvas,moveStoryboardShot} from './creation-editor.js';
+import {creationEditor,proposalPreview,captureDocument,editStructure,replaceDraft,libraryRow,readLibrary,readRelations,readIdeas,appendPhaseRow,removePhaseRow,addRelationRow,removeRelationRow,addOutfitRow,setCharFilter,setIdeaFilter,toggleCanvas,storyboardCanvas,moveStoryboardShot} from './creation-editor.js';
 import {settingsExtras,cloudTemplatesView,cloudSettings,readCloud,agnesBannerView,geminiBannerView,mimoBannerView,arkBannerView,zhipuBannerView,sfBannerView,secretPendingHtml,secretUsage,secretRowsHtml} from './settings-extra.js';
 import {updatePanel,handleUpdate} from './updates.js';
 import {videoWorkbench, shotProgress, readShot, flatShots, pickedShots, comparePick, compareList, compareClear} from './video-workbench.js';
@@ -14,7 +14,7 @@ const names = {coach:'引导助手',outline:'故事大纲', script:'剧本分镜
 const statuses = {queued:'排队中', running:'执行中', succeeded:'已完成', failed:'失败', cancelled:'已取消', interrupted:'执行中断'};
 const voiceDrafts=new Map();
 const countLabel = n => n > 99 ? '99+' : String(n);
-let videoKey='0-0'; let deploymentDirty=false; let state, projectId = localStorage.getItem('projectId'), page = 'outline', editor = false, dirty = false, previewId = '', timer, canvasMode = false, ideaFilter = {status: 'all', text: ''};
+let videoKey='0-0'; let deploymentDirty=false; let state, projectId = localStorage.getItem('projectId'), page = 'outline', editor = false, dirty = false, previewId = '', timer, canvasMode = false;
 function toast(message) {$('#toast').textContent = message; $('#toast').style.display = 'block'; clearTimeout(timer); timer = setTimeout(() => $('#toast').style.display = 'none', 6000);}
 const SESSION_HEADER_NAME = 'X-Workspace-Token';
 async function api(url, method = 'GET', data) {
@@ -289,7 +289,7 @@ if(action==='video-preview-preset'){for(const [key,value] of Object.entries({ste
 
   if(action==='canvas-toggle'){toggleShotCanvas();render();return;}
   if(action==='canvas-open-shot'){videoKey=el.dataset.key;if(canvasActive())toggleShotCanvas();render();return;}
-  if(action.startsWith('creation-')||action==='storyboard-mode'||action==='sb-generate'||action==='rel-add'||action==='rel-remove'||action==='rel-add-for'||action==='idea-quick-add'||action==='idea-remove'||action==='idea-save'||action==='idea-filter'||action==='creation-worldbook'){
+  if(action.startsWith('creation-')||action==='storyboard-mode'||action==='sb-generate'||action==='rel-add'||action==='rel-remove'||action==='rel-add-for'||action==='char-filter'||action==='idea-quick-add'||action==='idea-remove'||action==='idea-save'||action==='idea-filter'||action==='creation-worldbook'){
  if(action==='char-avatar'){const card=el.closest('[data-library-row]');const hidden=card?.querySelector('[data-avatar-asset]');if(!hidden)throw new Error('未找到头像位');hidden.value=el.dataset.id;dirty=true;toast('头像已选择，保存稿件后生效并更新关系图谱');return;}
  if(action==='outfit-add'){addOutfitRow(el.dataset.char);dirty=true;return;}
  if(action==='outfit-remove'){el.closest('[data-outfit-row]')?.remove();dirty=true;return;}
@@ -299,7 +299,7 @@ if(action==='video-preview-preset'){for(const [key,value] of Object.entries({ste
  if(action==='rel-add-for'){const cid=el.dataset.char;const host=document.getElementById('rel-rows');if(!host){toast('请先在大纲页「关系图谱」面板展开后添加');return;}if(dirty)await saveCreation();addRelationRow(project(),{from:cid});dirty=true;const row=host.querySelector('[data-rel-row]:last-child [data-rel-from]');if(row){row.value=cid;row.closest('[data-rel-row]').scrollIntoView({block:'center'});}toast('已预填角色 A，请选择关系与角色 B 后保存');return;}
  if(action==='rel-remove'){el.closest('[data-rel-row]')?.remove();dirty=true;return;}
  if(action==='char-filter'){const g=el.dataset.group;setCharFilter(g);document.querySelectorAll('[data-library="characters"] [data-library-row]').forEach(card=>{const sel=card.querySelector('[data-cast-group]');card.hidden=g!=='all'&&(!sel||sel.value!==g);});document.querySelectorAll('[data-char-filter]').forEach(btn=>btn.classList.toggle('active',btn.dataset.charFilter===g));return;}
- if(action==='idea-filter'){ideaFilter.status=el.dataset.status;render();return;}
+ if(action==='idea-filter'){setIdeaFilter(el.dataset.status);render();return;}
  if(action==='idea-quick-add'){const input=document.getElementById('idea-quick-input');const text=(input?.value||'').trim();if(!text)throw new Error('先写点想法再记录');if(dirty)await saveCreation();const p=project();const idea={id:crypto.randomUUID(),content:text,status:'new',tag:'',chapterId:p.activeChapterId,createdAt:new Date().toISOString()};await saveProject({ideas:[...(p.ideas||[]),idea]});if(input)input.value='';toast('闪念已记录');return;}
  if(action==='idea-remove'){const id=el.dataset.id;if(dirty)await saveCreation();const p=project();await saveProject({ideas:(p.ideas||[]).filter(x=>x.id!==id)});toast('闪念已移除');return;}
  if(action==='idea-save'){await saveCreation();toast('闪念已保存');return;}
@@ -527,7 +527,7 @@ document.addEventListener('drop',e=>{
   const zone=e.target.closest&&e.target.closest('[data-sb-scene]');
   if(zone&&Number(zone.dataset.sbScene)!==Number(sbDrag.split('.')[0])){moveStoryboardShot(sbDrag,Number(zone.dataset.sbScene)+':end',project());dirty=true;render();toast('镜头已移动到场景 '+(Number(zone.dataset.sbScene)+1)+' 末尾');}
 });
-document.addEventListener('input',e=>{if(e.target.id==='secret-search'){secretSearch=e.target.value;renderSecretList();}if(e.target.dataset.voiceText!==undefined)voiceDrafts.set(e.target.dataset.voiceText,e.target.value);if(e.target.matches('[data-deploy-config]'))deploymentDirty=true;if(e.target.closest('#app')&&e.target.id!=='project-select'&&!e.target.matches('[data-transient],[data-editor-nav]')&&e.target.type!=='file'&&!e.target.matches('[data-shot-pick]')&&!e.target.matches('[data-deploy-config]')){dirty=true;const status=$('.form-status');if(status)status.textContent='有未保存修改';if(page==='models'){const ha=$('.heading-actions');if(ha&&!ha.querySelector('[data-action="save-settings"]'))ha.insertAdjacentHTML('afterbegin',button('保存设置','save-settings','primary'));}}});
+document.addEventListener('input',e=>{if(e.target.id==='secret-search'){secretSearch=e.target.value;renderSecretList();}if(e.target.id==='idea-search'){setIdeaFilter(undefined,e.target.value);const q=e.target.value.trim().toLowerCase();document.querySelectorAll('#idea-rows [data-idea-row]').forEach(r=>{const hay=((r.querySelector('[data-idea-content]')?.value||'')+' '+(r.querySelector('[data-idea-tag]')?.value||'')).toLowerCase();r.hidden=!!q&&!hay.includes(q);});return;}if(e.target.dataset.voiceText!==undefined)voiceDrafts.set(e.target.dataset.voiceText,e.target.value);if(e.target.matches('[data-deploy-config]'))deploymentDirty=true;if(e.target.closest('#app')&&e.target.id!=='project-select'&&!e.target.matches('[data-transient],[data-editor-nav]')&&e.target.type!=='file'&&!e.target.matches('[data-shot-pick]')&&!e.target.matches('[data-deploy-config]')){dirty=true;const status=$('.form-status');if(status)status.textContent='有未保存修改';if(page==='models'){const ha=$('.heading-actions');if(ha&&!ha.querySelector('[data-action="save-settings"]'))ha.insertAdjacentHTML('afterbegin',button('保存设置','save-settings','primary'));}}});
 document.addEventListener('change',async e=>{
   try {
     if(e.target.dataset.characterImport){if(dirty)throw new Error('请先保存角色');const file=e.target.files[0];if(!file)return;if(file.size>20*1024*1024)throw new Error('参考图不能超过 20MB');const h={'Content-Type':file.type||'application/octet-stream'};if(state?.token)h[SESSION_HEADER_NAME]=state?.token;const r=await fetch('/api/assets?'+new URLSearchParams({projectId,characterId:e.target.dataset.characterImport,name:file.name,kind:'image'}),{method:'POST',headers:h,body:file});const result=await r.json();if(!r.ok)throw new Error(result.error);e.target.value='';await refresh();toast('参考图已导入，请在角色卡片中选为参考');return;}

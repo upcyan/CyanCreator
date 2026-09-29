@@ -447,6 +447,7 @@ export const server = http.createServer(async (req, res) => {
           if(joins.some(Boolean)&&!joins.every(Boolean))throw Object.assign(new Error('转场需用于所有片段衔接处，或全部使用硬切'),{status:400});
           p.timeline = b.timeline;
         }
+        if('ideas' in b)p.ideas=validateIdeas(b.ideas,p.episodes.flatMap(e=>e.chapters).map(x=>x.id));
         revise(p);
       }
       Object.assign(original, p); persist(); return json(res, p);
