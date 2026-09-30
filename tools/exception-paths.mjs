@@ -10,6 +10,9 @@ import {mkdtemp, mkdir, writeFile, readFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+// ffmpeg 解析与生产一致：FFMPEG_PATH 优先，回退随包静态二进制（同 lib/media.js）。
+import ffmpeg from 'ffmpeg-static';
+const FFMPEG = process.env.FFMPEG_PATH || ffmpeg;
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -53,8 +56,8 @@ test('异常路径：权限 / 空数据 / 重复提交 / 失败 / 取消 / 依�
 
     // 素材（真实 ffmpeg 产物）
     const clipPath = path.join(workDir, 'c.mp4');
-    const exe = process.env.FFMPEG_PATH || 'ffmpeg';
-    await new Promise((res, rej) => { const c = spawn(exe, ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24', '-t', '2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', clipPath], {stdio: 'ignore'}); c.on('exit', code => code === 0 ? res() : rej(new Error('ffmpeg 失败'))); });
+    const exe = FFMPEG;
+    await new Promise((res, rej) => { const c = spawn(exe, ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24', '-t', '2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', clipPath], {stdio: 'ignore'}); c.on('error', rej); c.on('exit', code => code === 0 ? res() : rej(new Error('ffmpeg 失败'))); });
     const clipBuf = await readFile(clipPath);
     const up = await j(await fetch(`${BASE}/api/assets?projectId=${proj.id}&name=clip.mp4`, {method: 'POST', headers: {origin: BASE, 'x-workspace-token': token}, body: clipBuf}));
     assert.ok(up.id, '素材上传成功');

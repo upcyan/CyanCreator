@@ -5,14 +5,18 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
+// ffmpeg 解析与生产一致：FFMPEG_PATH 优先，回退随包静态二进制（同 lib/media.js）。
+import ffmpeg from 'ffmpeg-static';
+import ffprobe from 'ffprobe-static';
+const FF = process.env.FFMPEG_PATH || ffmpeg;
+const FP = process.env.FFPROBE_PATH || ffprobe.path;
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = process.env.CYAN_OUT || path.join(ROOT, 'test-output', 'e2e');
-const FF = process.env.FFMPEG_PATH || '/usr/bin/ffmpeg';
-const FP = process.env.FFPROBE_PATH || '/usr/bin/ffprobe';
+
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const j = r => r.json().catch(() => ({}));
-const run = (exe, args) => new Promise((res, rej) => { let o = '', e = ''; const c = spawn(exe, args, {stdio: ['ignore', 'pipe', 'pipe']}); c.stdout.on('data', d => o += d); c.stderr.on('data', d => e += d); c.on('exit', code => code === 0 ? res(o) : rej(new Error(exe + ' ' + code + ' ' + e.slice(0, 200)))); });
+const run = (exe, args) => new Promise((res, rej) => { let o = '', e = ''; const c = spawn(exe, args, {stdio: ['ignore', 'pipe', 'pipe']}); c.stdout.on('data', d => o += d); c.stderr.on('data', d => e += d); c.on('error', rej); c.on('exit', code => code === 0 ? res(o) : rej(new Error(exe + ' ' + code + ' ' + e.slice(0, 200)))); });
 const sha256 = async f => createHash('sha256').update(await readFile(f)).digest('hex');
 // 按导出任务解析产物：优先 job.assetId 对应文件，缺失时回退 media/ 下最大 mp4
 const resolveProduced = async (assetId, exclude) => {

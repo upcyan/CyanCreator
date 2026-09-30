@@ -5,6 +5,9 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 
 import {fileURLToPath} from 'node:url';
+// ffmpeg 解析与生产一致：FFMPEG_PATH 优先，回退随包静态二进制（同 lib/media.js）。
+import ffmpeg from 'ffmpeg-static';
+const FFMPEG = process.env.FFMPEG_PATH || ffmpeg;
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const j = r => r.json().catch(() => ({}));
@@ -12,7 +15,7 @@ const out = [];
 const rec = (t, ok, d = '') => { out.push({t, ok, detail: String(d)}); console.log((ok ? 'PASS' : 'FAIL') + ' ' + t + (d ? ' · ' + d : '')); };
 
 async function start(dataDir) {
-  const child = spawn(process.execPath, ['server.js'], {cwd: ROOT, env: {...process.env, PORT: '0', CYANCREATOR_DATA: dataDir, FFMPEG_PATH: process.env.FFMPEG_PATH || '/usr/bin/ffmpeg'}, stdio: ['ignore', 'pipe', 'pipe']});
+  const child = spawn(process.execPath, ['server.js'], {cwd: ROOT, env: {...process.env, PORT: '0', CYANCREATOR_DATA: dataDir, FFMPEG_PATH: FFMPEG}, stdio: ['ignore', 'pipe', 'pipe']});
   const port = await new Promise((res, rej) => { const t = setTimeout(() => rej(new Error('no port')), 10000); child.stdout.on('data', d => { const m = String(d).match(/127\.0\.0\.1:(\d+)/); if (m) { clearTimeout(t); res(Number(m[1])); } }); });
   const BASE = `http://127.0.0.1:${port}`;
   for (let i = 0; i < 40; i++) { try { if ((await fetch(`${BASE}/api/state`)).ok) break; } catch {} await sleep(200); }
@@ -29,7 +32,7 @@ try {
   const p1 = await j(await fetch(`${BASE}/api/projects`, {method: 'POST', headers: auth, body: JSON.stringify({name: '台账抽样 A'})}));
   const p2 = await j(await fetch(`${BASE}/api/projects`, {method: 'POST', headers: auth, body: JSON.stringify({name: '台账抽样 B'})}));
   const clip = path.join(workDir, 'c.mp4');
-  await new Promise((res, rej) => { const c = spawn(process.env.FFMPEG_PATH || '/usr/bin/ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24', '-t', '2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', clip], {stdio: 'ignore'}); c.on('exit', c2 => c2 === 0 ? res() : rej(new Error('ffmpeg'))); });
+  await new Promise((res, rej) => { const c = spawn(FFMPEG, ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24', '-t', '2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', clip], {stdio: 'ignore'}); c.on('exit', c2 => c2 === 0 ? res() : rej(new Error('ffmpeg'))); });
   const buf = await readFile(clip);
   const a1 = await j(await fetch(`${BASE}/api/assets?projectId=${p1.id}&name=a.mp4`, {method: 'POST', headers: {origin: BASE, 'x-workspace-token': st.token}, body: buf}));
   const a2 = await j(await fetch(`${BASE}/api/assets?projectId=${p2.id}&name=b.mp4`, {method: 'POST', headers: {origin: BASE, 'x-workspace-token': st.token}, body: buf}));

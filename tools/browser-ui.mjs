@@ -19,6 +19,9 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createServer} from 'node:net';
+// ffmpeg 解析与生产一致：FFMPEG_PATH 优先，回退随包静态二进制（同 lib/media.js）。
+import ffmpeg from 'ffmpeg-static';
+const FFMPEG = process.env.FFMPEG_PATH || ffmpeg;
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, 'test-output', 'ui-tools');
@@ -336,7 +339,7 @@ test('浏览器 UI 回归：AI 伴写按钮/弹窗（锚定、滚动同步、挂
     await evalJs(`(()=>{const f=window.__uitest.field;if(f)f.blur();window.scrollTo(0,0);return 'ok';})()`);
 
     // --- 8) 后期剪辑：转场下拉（真实交互 + 持久化 + 重载回显）---
-    const ffexe = process.env.FFMPEG_PATH || 'ffmpeg';
+    const ffexe = FFMPEG;
     const clipPath = path.join(workDir, 'clip.mp4');
     await new Promise((resolve, reject) => {
       const c = spawn(ffexe, ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24', '-t', '2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', clipPath], {stdio: 'ignore'});
