@@ -1,11 +1,29 @@
 // 镜头画布：视频生成页的第二视图。平移缩放 + 框选镜头，选择复用 pickedShots，与列表视图共享批量生成。
 import {flatShots, pickedShots} from './video-workbench.js';
+import {groupsOf, activeGroupOf, groupsBarHtml} from './canvas-workflow.js';
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const statuses={queued:'排队中',running:'生成中',failed:'生成失败',succeeded:'已生成',cancelled:'已取消',interrupted:'已中断'};
-let on=false,winBound=false,space=false;
+let on=false,winBound=false,space=false,panelKey='';
 const view={x:70,y:50,k:1};
 export const canvasActive=()=>on;
-export function toggleCanvas(){on=!on;}
+export function toggleCanvas(){on=!on;panelKey='';}
+export function openCanvasPanel(key){panelKey=key;}
+/** 节点就地面板：借鉴 LocalMiniDrama CanvasStoryboardPanel 的就地编辑思路——
+ *  在卡片下方展开内联表单，改提示词/时长后可保存、保存并生成、加入时间线，无需切回列表模式。
+ *  面板挂在 nodrag nopan 类容器内，避免与画布平移/框选冲突。 */
+function canvasShotPanel(s){
+ return `<div class="canvas-shot-panel nodrag nopan" data-canvas-panel="${s.key}">
+  <label>画面提示词<textarea data-canvas-field="prompt" rows="3">${esc(s.shot.prompt)}</textarea></label>
+  <div class="cols"><label>时长 / 秒<input type="number" min="4" max="15" step="1" data-canvas-field="duration" value="${s.shot.duration}"></label></div>
+  ${s.shot.direction?`<p class="hint">镜头语言：${['size','movement','lighting','depth','composition','blocking','mood'].map(k=>s.shot.direction[k]?`${({size:'景别',movement:'运镜',lighting:'灯光',depth:'景深',composition:'画面编排',blocking:'人物走位',mood:'情绪与色调'})[k]} ${s.shot.direction[k]}`:'').filter(Boolean).join(' · ')||'（无）'}</p>`:''}
+  <div class="actions">
+   <button class="small primary" data-action="canvas-panel-save" data-key="${s.key}">保存</button>
+   <button class="small" data-action="canvas-panel-save-gen" data-key="${s.key}">保存并生成</button>
+   <button class="small ghost" data-action="canvas-panel-close" data-key="${s.key}">收起</button>
+  </div>
+  <p class="hint">保存会走镜头编辑接口并刷新画布；生成进入全局串行队列。</p>
+ </div>`;
+}
 function jobsFor(p,state,si,i){return state.jobs.filter(j=>j.projectId===p.id&&j.kind==='video'&&j.scriptVersion===p.scriptVersion&&j.scene===si&&j.shot===i);}
 function shotAsset(p,state,si,i){const sel=p.selectedShots?.[`${si}-${i}`];return (sel&&state.assets.find(a=>a.id===sel&&a.projectId===p.id))||state.assets.filter(a=>a.projectId===p.id&&a.scriptVersion===p.scriptVersion&&a.scene===si&&a.shot===i).at(-1)||null;}
 function pickCount(p){let n=0;const prefix=p.id+':'+p.scriptVersion+':';for(const k of pickedShots)if(k.startsWith(prefix))n++;return n;}
@@ -14,15 +32,17 @@ export function canvasView(p,state){
  const shots=flatShots(p);
  if(!shots.length)return `<div class="panel"><h2>镜头画布</h2><p>先在剧本阶段完成分镜，再把镜头铺到画布上总览。</p><button class="small" data-action="navigate" data-page="script">前往剧本</button></div>`;
  const scenes=[];shots.forEach(s=>{(scenes[s.si]??=[]).push(s);});
+ const groupOf=(si,i)=>groupsOf(p).find(g=>g.shots.some(x=>x.scene===si&&x.shot===i));
  const body=scenes.map((list,si)=>`<section class="canvas-scene"><h3>场景 ${si+1} · ${esc(list[0].title)}</h3><div class="canvas-row">${list.map(s=>{
   const picked=pickedShots.has(`${p.id}:${p.scriptVersion}:${s.key}`);
+  const wf=groupOf(s.si,s.i);
   const jobs=jobsFor(p,state,s.si,s.i),status=jobs[0]?statuses[jobs[0].status]||jobs[0].status:'待生成';
   const a=shotAsset(p,state,s.si,s.i);
-  return `<article class="canvas-card ${picked?'picked':''}" data-key="${s.key}"><header><span class="mono">${s.si+1}.${s.i+1}</span><label class="canvas-pick"><input type="checkbox" data-shot-pick="${p.id}:${p.scriptVersion}:${s.key}" ${picked?'checked':''} aria-label="选择镜头 ${s.si+1}.${s.i+1}"></label></header><div class="canvas-thumb">${a?`<video src="${a.url}#t=0.1" preload="metadata" muted></video>`:'<span>▷</span>'}</div><p class="hint">${status} · ${s.shot.duration} 秒</p><p class="canvas-prompt">${esc(s.shot.prompt.slice(0,76)||'（无提示词）')}</p></article>`;
+  return `<article class="canvas-card ${picked?'picked':''} ${panelKey===s.key?'panel-open':''}" data-key="${s.key}"><header><span class="mono">${s.si+1}.${s.i+1}</span>${wf?`<span class="canvas-wf-badge" title="所属工作流">${esc(wf.title)}</span>`:''}<label class="canvas-pick"><input type="checkbox" data-shot-pick="${p.id}:${p.scriptVersion}:${s.key}" ${picked?'checked':''} aria-label="选择镜头 ${s.si+1}.${s.i+1}"></label></header><div class="canvas-thumb">${a?`<video src="${a.url}#t=0.1" preload="metadata" muted></video>`:`<span>▷</span>`}</div><p class="hint">${status} · ${s.shot.duration} 秒</p><p class="canvas-prompt">${esc(s.shot.prompt.slice(0,76)||'（无提示词）')}</p><button class="small ghost canvas-edit-btn" data-action="canvas-panel-open" data-key="${s.key}">${panelKey===s.key?'收起面板':'就地编辑'}</button>${panelKey===s.key?canvasShotPanel(s):''}</article>`;
  }).join('')}</div></section>`).join('');
  const stale=p.stale.script||p.stale.outline?'<div class="warning">上游稿件已变化，请先确认最新剧本。</div>':'';
  const seed=(state.settings.video.provider==='native'||state.settings.video.provider==='comfy')?'<button class="small" data-action="video-batch-continue">连续 Seed 批量</button>':'';
- return `<div class="panel row"><div><h2>镜头画布 · ${shots.length}</h2><p class="hint">空白处拖动框选 · 空格/中键拖动平移 · Ctrl+滚轮缩放 · 双击镜头进入编辑 <span id="canvas-pick-count"></span></p></div><div class="actions"><button class="small ghost" data-action="canvas-toggle">返回列表</button><button class="small" data-action="video-select-all">全选 / 清空</button><button class="small" data-action="canvas-add-timeline">所选加入时间线</button>${seed}<button class="small primary" data-action="video-batch">批量生成所选</button><button class="small" data-action="navigate" data-page="models" data-settings-tab="video">模型与部署</button></div></div>${stale}<div class="canvas-viewport" id="canvas-viewport"><div class="canvas-world" id="canvas-world">${body}</div><div class="canvas-band" id="canvas-band" hidden></div><div class="canvas-zoom"><button class="small ghost" data-zoom="-">−</button><span class="k" id="canvas-zoom-k">100%</span><button class="small ghost" data-zoom="+">＋</button><button class="small ghost" data-zoom="fit">适应</button></div><button id="canvas-open-shot-proxy" data-action="canvas-open-shot" hidden></button></div>`;
+ return `<div class="panel row"><div><h2>镜头画布 · ${shots.length}</h2><p class="hint">空白处拖动框选 · 空格/中键拖动平移 · Ctrl+滚轮缩放 · 双击镜头进入编辑 <span id="canvas-pick-count"></span></p></div><div class="actions"><button class="small ghost" data-action="canvas-toggle">返回列表</button><button class="small" data-action="video-select-all">全选 / 清空</button><button class="small" data-action="canvas-add-timeline">所选加入时间线</button>${seed}<button class="small primary" data-action="video-batch">批量生成所选</button><button class="small" data-action="navigate" data-page="models" data-settings-tab="video">模型与部署</button></div></div>${stale}${groupsBarHtml(p)}<div class="canvas-viewport" id="canvas-viewport"><div class="canvas-world" id="canvas-world">${body}</div><div class="canvas-band" id="canvas-band" hidden></div><div class="canvas-zoom"><button class="small ghost" data-zoom="-">−</button><span class="k" id="canvas-zoom-k">100%</span><button class="small ghost" data-zoom="+">＋</button><button class="small ghost" data-zoom="fit">适应</button></div><button id="canvas-open-shot-proxy" data-action="canvas-open-shot" hidden></button></div>`;
 }
 function updateCount(p){const el=document.getElementById('canvas-pick-count');if(el)el.textContent=pickCount(p)?`· 已选 ${pickCount(p)} 个镜头`:'';}
 function apply(vp,world){
@@ -88,6 +108,7 @@ export function mountCanvas(p){
  vp.addEventListener('pointercancel',endBand);
  world.addEventListener('click',e=>{
   const card=e.target.closest('.canvas-card');if(!card||e.target.closest('input,label,button,a'))return;
+  if(e.target.closest('.canvas-shot-panel'))return; // 面板内点击不切换勾选
   const input=card.querySelector('input[data-shot-pick]');input.checked=!input.checked;
   if(input.checked)pickedShots.add(input.dataset.shotPick);else pickedShots.delete(input.dataset.shotPick);
   card.classList.toggle('picked',input.checked);updateCount(p);

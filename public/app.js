@@ -1,11 +1,12 @@
 import {coachRender,coachHandle,coachBoot} from './coach.js';
 import {imageSettings,readImage} from './character-images.js';
 import {audioPanel,speechSettings,readSpeech,speechTemplate,readTracks,setDialogue} from './audio-panel.js';
-import {creationEditor,proposalPreview,captureDocument,editStructure,replaceDraft,libraryRow,readLibrary,readRelations,readIdeas,appendPhaseRow,removePhaseRow,addRelationRow,removeRelationRow,addOutfitRow,setCharFilter,setIdeaFilter,toggleCanvas,storyboardCanvas,moveStoryboardShot} from './creation-editor.js';
+import {creationEditor,proposalPreview,captureDocument,editStructure,replaceDraft,libraryRow,readLibrary,readRelations,readIdeas,appendPhaseRow,removePhaseRow,addRelationRow,removeRelationRow,addOutfitRow,setCharFilter,setIdeaFilter,getIdeaFilter,ideasPanelHtml,toggleCanvas,storyboardCanvas,moveStoryboardShot} from './creation-editor.js';
 import {settingsExtras,cloudTemplatesView,cloudSettings,readCloud,agnesBannerView,geminiBannerView,mimoBannerView,arkBannerView,zhipuBannerView,sfBannerView,secretPendingHtml,secretUsage,secretRowsHtml} from './settings-extra.js';
 import {updatePanel,handleUpdate} from './updates.js';
 import {videoWorkbench, shotProgress, readShot, flatShots, pickedShots, comparePick, compareList, compareClear} from './video-workbench.js';
-import {canvasActive, toggleCanvas as toggleShotCanvas, canvasView, mountCanvas} from './shot-canvas.js'; import {nativeSettings, readNative} from './native-settings.js'; import {modelHubView, deploymentProgress, runtimeStatus, readDeploymentConfig, mossHubCard} from './model-hub.js'; import {textModelsView, readTextSettings, updateTextProfiles, resolvedModelName} from './text-models.js';
+import {canvasActive, toggleCanvas as toggleShotCanvas, canvasView, mountCanvas, openCanvasPanel} from './shot-canvas.js';
+import {shotsFromPicked, buildGroup, groupsOf, activeGroupOf, setActiveGroup, getActiveGroup, runGroup} from './canvas-workflow.js'; import {nativeSettings, readNative} from './native-settings.js'; import {modelHubView, deploymentProgress, runtimeStatus, readDeploymentConfig, mossHubCard} from './model-hub.js'; import {textModelsView, readTextSettings, updateTextProfiles, resolvedModelName} from './text-models.js';
 import {assetLibraryView} from './asset-library.js';
 const $ = s => document.querySelector(s);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -15,7 +16,17 @@ const statuses = {queued:'排队中', running:'执行中', succeeded:'已完成'
 const voiceDrafts=new Map();
 const countLabel = n => n > 99 ? '99+' : String(n);
 let videoKey='0-0'; let deploymentDirty=false; let state, projectId = localStorage.getItem('projectId'), page = 'outline', editor = false, dirty = false, previewId = '', timer, canvasMode = false;
-function toast(message) {$('#toast').textContent = message; $('#toast').style.display = 'block'; clearTimeout(timer); timer = setTimeout(() => $('#toast').style.display = 'none', 6000);}
+function toast(message, opts) {
+  const el = $('#toast'); el.textContent = message;
+  // N3 报错可操作化：错误类 toast 附带「去设置中心」直达按钮
+  const actionable = opts && opts.setup;
+  let btn = document.getElementById('toast-setup');
+  if (actionable) {
+    if (!btn) { btn = document.createElement('button'); btn.id = 'toast-setup'; btn.className = 'small'; btn.textContent = '去设置中心 ›'; btn.addEventListener('click', () => { el.style.display = 'none'; page = 'models'; render(); }); el.appendChild(btn); }
+    btn.hidden = false;
+  } else if (btn) btn.hidden = true;
+  el.style.display = 'block'; clearTimeout(timer); timer = setTimeout(() => { el.style.display = 'none'; if (btn) btn.hidden = true; }, 6000);
+}
 const SESSION_HEADER_NAME = 'X-Workspace-Token';
 async function api(url, method = 'GET', data) {
   const headers = {'Content-Type': 'application/json'};
@@ -31,7 +42,15 @@ function openModalEl(wide=false){const m=$('#modal');m.classList.toggle('wide',w
 function showModal(title, text, wide=false) {const m=$('#modal');m.classList.toggle('wide',wide);$('#modal-body').innerHTML = `<h2>${esc(title)}</h2><pre>${esc(text)}</pre>`; m.showModal();}
 function render() {
   const p = project(), pending = state.jobs.filter(j => ['queued','running'].includes(j.status)).length;
-  $('#app').innerHTML = `<div class="shell"><aside class="sidebar"><div class="brand"><div class="mark"><img src="/assets/cyancreator-icon.png" alt="CyanCreator"></div><div><b>CyanCreator</b><small>YOUR LOCAL AI STUDIO</small></div></div><div class="eyebrow">创作工作空间</div><nav class="nav">${stages.map((s,i) => button(`<span>0${i+1}</span>${names[s]}`, 'navigate', page === s ? 'active' : '', `data-page="${s}"`)).join('')}${button('<span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="m10 3-.6 2.3-2 .9-2.1-.6-2 3.4 1.6 1.7v2.5L3.3 15l2 3.4 2.2-.6 2 .9.5 2.3h4l.6-2.3 2-.9 2.1.6 2-3.4-1.6-1.8v-2.4l1.6-1.8-2-3.4-2.2.6-2-.9L14 3Z"/><circle cx="12" cy="12" r="3.2"/></svg></span>设置中心','navigate',page==='models'?'active':'','data-page="models"')}${button(`<span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 6.5V12l4 2"/></svg></span>任务记录 ${pending ? `· ${countLabel(pending)}` : ''}`,'navigate',page==='jobs'?'active':'','data-page="jobs"')}${button(`<span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="2.5" y="4.5" width="19" height="15" rx="2"/><path d="M7.5 4.5v15M16.5 4.5v15M2.5 9.5h5M2.5 14.5h5M16.5 9.5h5M16.5 14.5h5M7.5 7h4.5M7.5 12h4.5M7.5 17h4.5"/></svg></span>素材库 ${state.assets.length ? `· ${countLabel(state.assets.length)}` : ''}`,'navigate',page==='assets'?'active':'','data-page="assets"')}</nav><div class="sidefoot"><span class="status-dot"></span>本地工作空间<br>项目与素材保存在此机器<br><br>CYANCREATOR / 0.4.4</div></aside><main class="main"><header class="topbar"><div class="actions"><span class="muted">项目 /</span><select id="project-select" aria-label="当前项目"><option value="">选择项目</option>${state.projects.map(x => `<option value="${x.id}" ${x.id===projectId?'selected':''}>${esc(x.name)}</option>`).join('')}</select>${button('＋ 新建','new-project','small ghost')}${p?button('管理','manage-project','small ghost','data-id="'+p.id+'"'):''}</div><div class="right"><span class="tag">LOCAL FIRST</span><span class="muted">${p?`修订 ${p.revision}`:'准备创作'}</span></div></header><div class="workspace">${state.storageError?'<p class="warning">工作区保存受阻，修改暂存在内存，请检查磁盘与文件占用后重试保存。取消任务仍可操作。</p>':''}${stages.includes(page)?`<div class="steps">${stages.map((s,i)=>button(`<span class="num">0${i+1}</span><span>${names[s]}<small>${['构思 · 世界观 · 节拍','场景 · 对白 · 镜头','本地推理 · 素材入库','时间线 · 剪辑 · 导出'][i]}</small></span>`,'navigate',`step ${s===page?'active':''}`,`data-page="${s}"`)).join('')}</div>`:''}<div class="heading"><div><div class="eyebrow">${page==='models'?'MODEL WORKBENCH':page==='jobs'||page==='projects'?'PRODUCTION LOG':'FROM IDEA TO FILM'}</div><h1>${names[page]}</h1><p class="subtitle">${{outline:'让一个想法，长成一个值得讲述的故事。',script:'从故事节拍到台词，再到每一个可执行的镜头。',video:'选择视频模型，把分镜变成画面。',edit:'挑选、裁剪、排序，把镜头连成作品。',models:'让每一个创作环节，连接合适的模型。',jobs:'查看真实执行状态、生成结果与耗时。',projects:'重命名、复制、导出或删除你的项目。',assets:'所有项目生成的视频、音频与图像，集中管理。'}[page]}</p></div><div class="heading-actions">${page==='models'&&dirty?button('保存设置','save-settings','primary'):''}<span class="form-status">${dirty?'有未保存修改':''}</span></div></div>${page==='models'?modelsView():page==='jobs'?jobsView():page==='projects'?projectsView():page==='assets'?assetLibraryView(state):!p?`<div class="hero"><div class="eyebrow">A SPACE FOR YOUR NEXT STORY</div><h2>从灵感的第一行，<br>到成片的最后一帧。</h2><p>大纲、剧本、生成与剪辑，在同一个工作空间。</p><div class="orb"></div></div><div class="panel">${empty('开始你的第一个项目','为故事起一个名字。接入模型前，也可以手动编写、导入素材和完成剪辑。')}<div class="actions">${button('＋ 创建项目','new-project','primary')}${button('配置模型','navigate','','data-page="models"')}</div></div>`:page==='outline'||page==='script'?writingView(p):page==='video'?videoView(p):editView(p)}</div></main></div>`;
+  // 伴写浮层竞态修复（F1）：整页 innerHTML 重建会替换正在聚焦的字段，
+  // 先捕获焦点元素、光标与伴写锚点，重建后恢复，避免打字/测试中被轮询渲染打断。
+  const prevActive = document.activeElement;
+  const prevInApp = prevActive && prevActive.closest && prevActive.closest('#app') ? prevActive : null;
+  const prevPath = prevInApp && prevInApp.getAttribute ? prevInApp.getAttribute('data-doc-path') : null;
+  const prevId = prevInApp && prevInApp.id ? prevInApp.id : null;
+  const prevCaret = prevInApp && typeof prevInApp.selectionStart === 'number' ? { s: prevInApp.selectionStart, e: prevInApp.selectionEnd } : null;
+  const popWasOpen = assistPopOpen;
+  $('#app').innerHTML = `<div class="shell"><aside class="sidebar"><div class="brand"><div class="mark"><img src="/assets/cyancreator-icon.png" alt="CyanCreator"></div><div><b>CyanCreator</b><small>YOUR LOCAL AI STUDIO</small></div></div><div class="eyebrow">创作工作空间</div><nav class="nav">${stages.map((s,i) => button(`<span>0${i+1}</span>${names[s]}`, 'navigate', page === s ? 'active' : '', `data-page="${s}"`)).join('')}${button('<span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="m10 3-.6 2.3-2 .9-2.1-.6-2 3.4 1.6 1.7v2.5L3.3 15l2 3.4 2.2-.6 2 .9.5 2.3h4l.6-2.3 2-.9 2.1.6 2-3.4-1.6-1.8v-2.4l1.6-1.8-2-3.4-2.2.6-2-.9L14 3Z"/><circle cx="12" cy="12" r="3.2"/></svg></span>设置中心','navigate',page==='models'?'active':'','data-page="models"')}${button(`<span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 6.5V12l4 2"/></svg></span>任务记录 ${pending ? `· ${countLabel(pending)}` : ''}`,'navigate',page==='jobs'?'active':'','data-page="jobs"')}${button(`<span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="2.5" y="4.5" width="19" height="15" rx="2"/><path d="M7.5 4.5v15M16.5 4.5v15M2.5 9.5h5M2.5 14.5h5M16.5 9.5h5M16.5 14.5h5M7.5 7h4.5M7.5 12h4.5M7.5 17h4.5"/></svg></span>素材库 ${state.assets.length ? `· ${countLabel(state.assets.length)}` : ''}`,'navigate',page==='assets'?'active':'','data-page="assets"')}</nav><div class="sidefoot"><span class="status-dot"></span>本地工作空间<br>项目与素材保存在此机器<br><br>CYANCREATOR / 0.5.0</div></aside><main class="main"><header class="topbar"><div class="actions"><span class="muted">项目 /</span><select id="project-select" aria-label="当前项目"><option value="">选择项目</option>${state.projects.map(x => `<option value="${x.id}" ${x.id===projectId?'selected':''}>${esc(x.name)}</option>`).join('')}</select>${button('＋ 新建','new-project','small ghost')}${p?button('管理','manage-project','small ghost','data-id="'+p.id+'"'):''}${p?button(`闪念笔记${p.ideas?.length?` · ${countLabel(p.ideas.length)}`:''}`,'ideas-open','small ghost'):''}</div><div class="right"><span class="tag">LOCAL FIRST</span><span class="muted">${p?`修订 ${p.revision}`:'准备创作'}</span></div></header><div class="workspace">${state.storageError?'<p class="warning">工作区保存受阻，修改暂存在内存，请检查磁盘与文件占用后重试保存。取消任务仍可操作。</p>':''}${stages.includes(page)?`<div class="steps">${stages.map((s,i)=>button(`<span class="num">0${i+1}</span><span>${names[s]}<small>${['构思 · 世界观 · 节拍','场景 · 对白 · 镜头','本地推理 · 素材入库','时间线 · 剪辑 · 导出'][i]}</small></span>`,'navigate',`step ${s===page?'active':''}`,`data-page="${s}"`)).join('')}</div>`:''}<div class="heading"><div><div class="eyebrow">${page==='models'?'MODEL WORKBENCH':page==='jobs'||page==='projects'?'PRODUCTION LOG':'FROM IDEA TO FILM'}</div><h1>${names[page]}</h1><p class="subtitle">${{outline:'让一个想法，长成一个值得讲述的故事。',script:'从故事节拍到台词，再到每一个可执行的镜头。',video:'选择视频模型，把分镜变成画面。',edit:'挑选、裁剪、排序，把镜头连成作品。',models:'让每一个创作环节，连接合适的模型。',jobs:'查看真实执行状态、生成结果与耗时。',projects:'重命名、复制、导出或删除你的项目。',assets:'所有项目生成的视频、音频与图像，集中管理。'}[page]}</p></div><div class="heading-actions">${page==='models'&&dirty?button('保存设置','save-settings','primary'):''}<span class="form-status">${dirty?'有未保存修改':''}</span></div></div>${page==='models'?modelsView():page==='jobs'?jobsView():page==='projects'?projectsView():page==='assets'?assetLibraryView(state):!p?`<div class="hero"><div class="eyebrow">A SPACE FOR YOUR NEXT STORY</div><h2>从灵感的第一行，<br>到成片的最后一帧。</h2><p>大纲、剧本、生成与剪辑，在同一个工作空间。</p><div class="orb"></div></div><div class="panel welcome-panel">${empty('开始你的第一个项目','为故事起一个名字。接入模型前，也可以手动编写、导入素材和完成剪辑。')}${button('＋ 创建项目','new-project','primary welcome-cta')}${button('配置模型','navigate','welcome-cta','data-page="models"')}<p class="welcome-or">或者 <button class="small ghost" data-action="coach-toggle">让引导助手带你走一遍</button></p></div>`:page==='outline'||page==='script'?writingView(p):page==='video'?videoView(p):editView(p)}</div></main></div>`;
   coachRender(state);
   if(page==='models'&&document.querySelector('[data-settings-section="security"]')){
   {const vh=document.getElementById('vault-backend-hint');if(vh&&state.vault?.label)vh.textContent='当前密钥加密方式：'+state.vault.label+(state.vault.note?'（'+state.vault.note+'）':'')+'。保存后不回显，不写入浏览器存储或项目文件。';}
@@ -39,8 +58,23 @@ function render() {
     const profiles=state.settings?.text?.profiles||[];
     document.getElementById('assist-pop-models').innerHTML=profiles.map(p=>'<label class="assist-model-check"><input type="checkbox" value="'+esc(p.id)+'" checked> '+esc(p.name)+' &middot; '+esc(p.model)+'</label>').join('');
   }const u=secretUsage(state);const all=[...state.secrets].sort((a,b)=>{if(secretSort==='time-desc'||secretSort==='time-asc'){const av=a.createdAt?Date.parse(a.createdAt):0,bv=b.createdAt?Date.parse(b.createdAt):0;return secretSort==='time-desc'?bv-av:av-bv;}return secretSort==='desc'?b.name.localeCompare(a.name):a.name.localeCompare(b.name);});const shown=all.filter(x=>x.name.toLowerCase().includes(secretSearch.toLowerCase()));const host=document.getElementById('secret-rows');if(host)host.innerHTML=secretRowsHtml(state,u,secretSearch,secretSort,secretEdit).rows;const cnt=document.getElementById('secret-count');if(cnt)cnt.textContent=`显示 ${shown.length} / 共 ${all.length} 个密钥`;}
-  hideAssistPop();
-  {const fl=$('#assist-float');if(fl)fl.hidden=true;}
+  // 伴写浮层竞态修复（F1）：重建后按 data-doc-path 重绑定锚点并恢复焦点与弹层，
+  // 只有既无焦点也无打开弹层时才收起，替代原先无条件隐藏。
+  if (assistField && !assistField.isConnected) {
+    const path = assistField.getAttribute && assistField.getAttribute('data-doc-path');
+    assistField = path ? document.querySelector(`[data-doc-path="${CSS.escape(path)}"]`) : null;
+    window.__af = assistField;
+  }
+  if (prevInApp && (prevPath || prevId)) {
+    const el = prevPath ? document.querySelector(`[data-doc-path="${CSS.escape(prevPath)}"]`) : document.getElementById(prevId);
+    if (el) { el.focus({ preventScroll: true }); if (prevCaret && el.setSelectionRange) { try { el.setSelectionRange(prevCaret.s, prevCaret.e); } catch {} } if (!assistField) { assistField = el.closest(assistTargets); window.__af = assistField; } }
+  }
+  {const fl=$('#assist-float');
+   if (assistField && assistField.isConnected && (popWasOpen || document.activeElement === assistField || (assistField.contains && assistField.contains(document.activeElement)))) {
+     fl.hidden = false; positionAssistFloat();
+   } else {
+     hideAssistPop(); if (fl) fl.hidden = true;
+   }}
   if(canvasActive()&&page==='video'&&project())mountCanvas(project(),state);
   document.querySelectorAll('[data-voice-text]').forEach(t=>{const d=voiceDrafts.get(t.dataset.voiceText);if(d)t.value=d;});
 }
@@ -115,7 +149,7 @@ let settingsTab='models';
 let modelsSubTab='text';
 function modelsView(){
  const groups=[['schemes','模型方案','预设整套搭配，一键应用',schemesView(state)],['multimodal','组合接入','一次部署 / 一套密钥，组合打通多个创作环节',arkBannerView()+zhipuBannerView()+sfBannerView()+agnesBannerView()+geminiBannerView()+mimoBannerView()],['local','本地部署','下载权重、管理运行环境与部署任务',modelHubView(state)+mossHubCard(state)],['models','模型参数','各环节模型连接与参数配置',modelsParamsView()],['security','密钥管理','集中保存模型密钥并通过引用名复用',settingsExtras(state,secretSearch,secretSort)],['updates','平台更新','检查版本与应用更新',updatePanel()]];
- return '<div class="settings-layout"><nav class="settings-sections" aria-label="设置分类">'+groups.map(([id,title,description])=>'<button data-action="settings-tab" data-id="'+id+'" class="'+(settingsTab===id?'active':'')+'" aria-pressed="'+(settingsTab===id)+'"><b>'+title+'</b><small>'+description+'</small></button>').join('')+'</nav><div class="settings-content">'+groups.map(([id,title,description,content])=>'<section data-settings-section="'+id+'" '+(settingsTab===id?'':'hidden')+'><header class="settings-section-heading"><div><h2>'+title+'</h2><p class="hint">'+description+'</p></div>'+'</header>'+content.replace(/<button\b[^>]*data-action="save-settings"[^>]*>[\s\S]*?<\/button>/g,'')+'</section>').join('')+'</div></div>';
+ return '<div class="settings-layout"><nav class="settings-sections" aria-label="设置分类">'+groups.map(([id,title,description])=>'<button data-action="settings-tab" data-id="'+id+'" class="'+(settingsTab===id?'active':'')+'" aria-pressed="'+(settingsTab===id)+'"><b>'+title+'</b><small>'+description+'</small></button>').join('')+'</nav><div class="settings-content"><section data-settings-section="display" '+(settingsTab==='display'?'':'hidden')+'><header class="settings-section-heading"><div><h2>界面显示</h2><p class="hint">窄窗口下的显示缩放；关闭后按原始尺寸渲染。</p></div></header><div class="panel"><label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="compact-scale-toggle" '+(window.__compactScaleEnabled&&window.__compactScaleEnabled()?'checked':'')+' style="width:auto"> 窄窗口自动缩小界面（&lt;1080px 时按比例缩放）</label></div></section>'+groups.map(([id,title,description,content])=>'<section data-settings-section="'+id+'" '+(settingsTab===id?'':'hidden')+'><header class="settings-section-heading"><div><h2>'+title+'</h2><p class="hint">'+description+'</p></div>'+'</header>'+content.replace(/<button\b[^>]*data-action="save-settings"[^>]*>[\s\S]*?<\/button>/g,'')+'</section>').join('')+'</div></div>';
 }
 function modelsParamsView(){
   const tabs=[
@@ -137,7 +171,7 @@ function projectsView() {
   return state.projects.length ? `<div class="panel">${state.projects.map(x => `<div class="row" style="padding:13px 0;border-bottom:1px solid var(--line)"><div><h3>${esc(x.name)}${x.id === projectId ? ' <span class="tag">当前</span>' : ''}</h3><p>修订 ${x.revision} · ${counts[x.id] || 0} 个素材 · ${new Date(x.updatedAt).toLocaleString()}</p></div><div class="actions">${button('打开','open-project','small',`data-id="${x.id}"`)}${button('重命名','rename-project','small',`data-id="${x.id}"`)}${button('复制','duplicate-project','small',`data-id="${x.id}"`)}${button('导出','export-project','small',`data-id="${x.id}"`)}${button('删除','delete-project','small danger',`data-id="${x.id}"`)}</div></div>`).join('')}</div>` : empty('还没有项目','点击右上角「＋ 新建」开始你的第一个故事。');
 }
 function jobsView() {
-  return `${page==='jobs'?projectsView():''}<div class="panel"><div class="panel-head"><h2>生产任务</h2><div class="actions">${button('项目管理','manage-projects','small')}${button('导入项目','import-project','small')}${button('刷新','refresh','small')}</div></div><p class="hint">同一工作台串行执行。取消会停止本地等待，已提交的远端任务可能继续执行；远端 ID 可用于检查。重启后不自动重复提交。</p>${state.jobs.map(j=>`<div class="job"><div class="row"><div><h3>${names[j.kind]}${j.shotLabel?' · '+esc(j.shotLabel):''} <span class="tag ${j.status}">${statuses[j.status]}</span></h3><p>${esc(state.projects.find(p=>p.id===j.projectId)?.name)} · ${new Date(j.createdAt).toLocaleString()} ${j.elapsedMs?`· ${(j.elapsedMs/1000).toFixed(1)}s`:''}</p></div><div class="actions">${['queued','running'].includes(j.status)?button('取消本地任务','cancel','small',`data-id="${j.id}"`):''}${j.result?button('查看结果','job-result','small',`data-id="${j.id}"`):''}${j.result&&!j.applied&&j.status==='succeeded'?button('应用结果','apply-result','small',`data-id="${j.id}"`):''}${j.assetId?`<a href="/media/${j.assetId}" download="${j.assetId}.${state.assets.find(a=>a.id===j.assetId)?.extension||'mp4'}">下载素材</a>`:''}</div></div>${j.progress?.message?`<p>${esc(j.progress.message)}</p>`:''}${j.remoteId?`<p>远端 ID：<span class="mono">${esc(j.remoteId)}</span></p>`:''}${j.error?`<p class="warning">${esc(j.error)}</p>`:''}${j.note?`<p>${esc(j.note)}</p>`:''}${button('执行详情','job-detail','small ghost',`data-id="${j.id}"`)}</div>`).join('')||empty('暂无任务','开始生成大纲、镜头或导出成片后，在这里查看进度。')}</div>`;
+  return `${page==='jobs'?projectsView():''}<div class="panel"><div class="panel-head"><h2>生产任务</h2><div class="actions">${button('项目管理','manage-projects','small')}${button('导入项目','import-project','small')}${button('刷新','refresh','small')}</div></div><p class="hint">同一工作台串行执行。取消会停止本地等待，已提交的远端任务可能继续执行；远端 ID 可用于检查。重启后不自动重复提交。</p>${state.jobs.map(j=>`<div class="job"><div class="row"><div><h3>${names[j.kind]}${j.shotLabel?' · '+esc(j.shotLabel):''} <span class="tag ${j.status}">${statuses[j.status]}</span></h3><p>${esc(state.projects.find(p=>p.id===j.projectId)?.name)} · ${new Date(j.createdAt).toLocaleString()} ${j.elapsedMs?`· ${(j.elapsedMs/1000).toFixed(1)}s`:''}</p></div><div class="actions">${['queued','running'].includes(j.status)?button('取消本地任务','cancel','small',`data-id="${j.id}"`):''}${j.result?button('查看结果','job-result','small',`data-id="${j.id}"`):''}${j.result&&!j.applied&&j.status==='succeeded'?button('应用结果','apply-result','small',`data-id="${j.id}"`):''}${j.assetId?`<a href="/media/${j.assetId}" download="${j.assetId}.${state.assets.find(a=>a.id===j.assetId)?.extension||'mp4'}">下载素材</a>`:''}</div></div>${j.progress?.message?`<p>${esc(j.progress.message)}</p>`:''}${typeof j.progress?.percent==='number'&&['queued','running'].includes(j.status)?`<div class="job-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${j.progress.percent}" aria-label="任务进度"><div class="job-progress-bar" style="width:${Math.min(100,Math.max(0,j.progress.percent))}%"></div><span>${j.progress.percent}%</span></div>`:''}${j.remoteId?`<p>远端 ID：<span class="mono">${esc(j.remoteId)}</span></p>`:''}${j.error?`<p class="warning">${esc(j.error)}</p>`:''}${j.note?`<p>${esc(j.note)}</p>`:''}${button('执行详情','job-detail','small ghost',`data-id="${j.id}"`)}</div>`).join('')||empty('暂无任务','开始生成大纲、镜头或导出成片后，在这里查看进度。')}</div>`;
 }
 function readTimeline() {const p=project(); document.querySelectorAll('.clip').forEach(row=>{const i=Number(row.dataset.index);for(const input of row.querySelectorAll('[data-field]')) p.timeline[i][input.dataset.field]=Number(input.value);if(p.timeline[i])p.timeline[i].transition=row.querySelector('[data-field=transition]')?.value||'';});}
 async function saveProject(data) {const p=project(); await api(`/api/projects/${p.id}`,'PUT',{revision:p.revision,...data}); dirty=false; await refresh();}
@@ -155,6 +189,7 @@ async function handle(action, el) {
   if(action==='asset-delete-confirm'){await api('/api/assets/'+el.dataset.id,'DELETE');$('#modal').close();await refresh();toast('素材已删除');return;}
   if(action==='asset-cancel'){$('#modal').close();return;}
   else if(action==='manage-projects'||action==='manage-project'){if(dirty)throw new Error('请先保存当前修改');page='projects';render();return;}
+  else if(action==='ideas-open'){const proj=project();if(!proj)throw new Error('请先选择项目');$('#modal-body').innerHTML='<h2>闪念笔记</h2><div id="ideas-modal-body">'+ideasPanelHtml(proj,getIdeaFilter().status,getIdeaFilter().text)+'</div>';openModalEl(true);return;}
   else if(action==='open-project'){if(dirty)throw new Error('请先保存当前修改');projectId=el.dataset.id;localStorage.setItem('projectId',projectId);editor=false;await refresh();page='outline';render();return;}
   else if(action==='rename-project'){const x=state.projects.find(x=>x.id===el.dataset.id);$('#modal-body').innerHTML='<h2>重命名项目</h2><label for="rename-name">项目名称</label><input id="rename-name" maxlength="100" value="'+esc(x.name).replace(/&quot;/g,'&amp;quot;')+'"><div class="actions" style="margin-top:16px">'+button('保存','rename-project-confirm','primary','data-id="'+x.id+'"')+'</div>';openModalEl();$('#rename-name').focus();return;}
   else if(action==='rename-project-confirm'){await api('/api/projects/'+el.dataset.id,'POST',{action:'rename',name:$('#rename-name').value.trim()});$('#modal').close();await refresh();toast('项目已重命名');return;}
@@ -276,6 +311,7 @@ if(action==='canvas-add-timeline'){
 if(action==='video-preview-preset'){for(const [key,value] of Object.entries({steps:8,width:480,height:272}))document.querySelector('[data-shot-param="'+key+'"]').value=value;$('#shot-duration').value=4;dirty=true;toast('已填入 480×272、8 步、4 秒预览参数，保存并生成后生效；画质会降低。');return;}
  if(action==='prompt-preview'){const data=await api('/api/prompt-preview','POST',{projectId,scene:Number(el.dataset.scene),shot:Number(el.dataset.shot),prompt:$('#shot-prompt').value});showModal('实际视频提示词 · 无额外文本模型调用',data.prompt+'\n\n共 '+data.characters+' 字符；仅发送当前镜头。');return;}
  if(action==='settings-tab'){settingsTab=el.dataset.id;document.querySelectorAll('[data-settings-section]').forEach(section=>section.hidden=section.dataset.settingsSection!==settingsTab);document.querySelectorAll('[data-action="settings-tab"]').forEach(button=>{button.classList.toggle('active',button.dataset.id===settingsTab);button.setAttribute('aria-pressed',String(button.dataset.id===settingsTab));});return;}
+ if(el.id==='compact-scale-toggle'){if(window.__setCompactScale)window.__setCompactScale(el.checked);toast(el.checked?'窄窗口自动缩放已开启':'窄窗口自动缩放已关闭');return;}
   if(action==='character-generate-row'){if(dirty)throw new Error('请先保存角色设定，再生成角色图');const cid=el.dataset.id;const mode=document.querySelector(`[data-image-mode="${cid}"]`)?.value||'portrait';let instruction=document.querySelector(`[data-image-instruction="${cid}"]`)?.value||'';const outId=document.querySelector(`[data-image-outfit="${cid}"]`)?.value;const out=(project().characters.find(c=>c.id===cid)?.outfits||[]).find(o=>o.id===outId);if(out&&out.desc)instruction=`穿着${out.name}（${out.desc}）。`+instruction;await api('/api/jobs','POST',{projectId,kind:'character-image',characterId:cid,mode,instruction,...(outId?{outfitId:outId}:{})});await refresh();toast('角色图任务已排队，完成后在角色卡片中选择参考');return;}
   if(action==='character-select'){if(dirty)throw new Error('请先保存稿件');await saveProject({characterReference:{characterId:el.dataset.character,assetId:el.dataset.id}});toast('角色参考图已选定');return;}
   if(action==='job-result'){const j=state.jobs.find(j=>j.id===el.dataset.id);if(j.kind==='coach'){showModal('创作助手',j.result?.reply||'暂无回复');return;}if(j.kind==='guide'){showModal('创作向导',j.result?.reply||'暂无回复');return;}if(j.kind==='assist'){const p=state.projects.find(p=>p.id===j.projectId);$('#modal-body').innerHTML=proposalPreview(j,p);openModalEl(true);return;}}
@@ -288,6 +324,57 @@ if(action==='video-preview-preset'){for(const [key,value] of Object.entries({ste
   }
 
   if(action==='canvas-toggle'){toggleShotCanvas();render();return;}
+  // 画布节点就地面板：打开/收起（面板内容随 canvasView 重渲染，无需独立状态持久化）
+  if(action==='canvas-panel-open'){openCanvasPanel(el.dataset.key);render();return;}
+  if(action==='canvas-panel-close'){openCanvasPanel('');render();return;}
+  if(action==='canvas-panel-save'||action==='canvas-panel-save-gen'){
+    if(dirty)throw new Error('画布上有未保存修改，请先保存稿件');
+    const wrap=document.querySelector(`[data-canvas-panel="${CSS.escape(el.dataset.key)}"]`);
+    if(!wrap)throw new Error('面板已失效，请重新打开');
+    const [scene,shot]=el.dataset.key.split('-').map(Number);
+    const prompt=wrap.querySelector('[data-canvas-field="prompt"]').value.trim();
+    const duration=Number(wrap.querySelector('[data-canvas-field="duration"]').value);
+    if(!prompt)throw new Error('画面提示词不能为空');
+    if(!Number.isInteger(duration)||duration<4||duration>15)throw new Error('时长须为 4–15 秒的整数');
+    await api(`/api/projects/${projectId}/shots/${scene}/${shot}/edit`,'POST',{revision:project().revision,prompt,duration});
+    await refresh();
+    if(action==='canvas-panel-save-gen'){await api('/api/jobs','POST',{projectId,kind:'video',scene,shot});await refresh();openCanvasPanel('');render();toast('镜头已保存并加入生成队列');}
+    else{render();toast('镜头已保存');}
+    return;
+  }
+  // 画布工作流组：存所选为组 / 选择组 / 整组重跑 / 删除组
+  if(action==='canvas-wf-create'){
+    if(dirty)throw new Error('请先保存当前修改');
+    const p=project();
+    const shots=shotsFromPicked(p,pickedShots);
+    $('#modal-body').innerHTML='<h2>存所选为工作流</h2><p class="hint">已选 '+shots.length+' 个镜头（按场景与镜头序号排序）。</p><label for="canvas-wf-title">工作流名称</label><input id="canvas-wf-title" maxlength="60" placeholder="如：第一场批量"><div class="actions" style="margin-top:16px">'+button('保存工作流','canvas-wf-create-confirm','primary')+'</div>';
+    openModalEl();$('#canvas-wf-title').focus();return;
+  }
+  if(action==='canvas-wf-create-confirm'){
+    if(dirty)throw new Error('请先保存当前修改');
+    const p=project();
+    const shots=shotsFromPicked(p,pickedShots);
+    const g=buildGroup($('#canvas-wf-title').value,shots,groupsOf(p));
+    setActiveGroup(g.id);
+    await saveProject({__canvasGroups:[...groupsOf(p),g]});
+    $('#modal').close();
+    render();toast(`工作流「${g.title}」已保存：${g.shots.length} 个镜头`);return;
+  }
+  if(action==='canvas-wf-run'){
+    if(dirty)throw new Error('请先保存当前修改');
+    const p=project();const g=activeGroupOf(p);if(!g)throw new Error('请先选择工作流');
+    const summary=await runGroup(api,p,g);
+    await refresh();render();
+    if(summary.failed.length)toast(`整组重跑中断：已投递 ${summary.ok.length} 镜，${summary.failed[0].shot} 失败（${summary.failed[0].error}）`);
+    else toast(`工作流「${g.title}」已整组投递：${summary.ok.length} 个镜头进入串行队列`);
+    return;
+  }
+  if(action==='canvas-wf-delete'){
+    if(dirty)throw new Error('请先保存当前修改');
+    const p=project();const g=activeGroupOf(p);if(!g)throw new Error('请先选择工作流');
+    await saveProject({__canvasGroups:groupsOf(p).filter(x=>x.id!==g.id)});
+    setActiveGroup('');render();toast(`已删除工作流「${g.title}」（不影响镜头与素材）`);return;
+  }
   if(action==='canvas-open-shot'){videoKey=el.dataset.key;if(canvasActive())toggleShotCanvas();render();return;}
   if(action.startsWith('creation-')||action==='storyboard-mode'||action==='sb-generate'||action==='rel-add'||action==='rel-remove'||action==='rel-add-for'||action==='char-filter'||action==='idea-quick-add'||action==='idea-remove'||action==='idea-save'||action==='idea-filter'||action==='creation-worldbook'){
  if(action==='char-avatar'){const card=el.closest('[data-library-row]');const hidden=card?.querySelector('[data-avatar-asset]');if(!hidden)throw new Error('未找到头像位');hidden.value=el.dataset.id;dirty=true;toast('头像已选择，保存稿件后生效并更新关系图谱');return;}
@@ -299,10 +386,12 @@ if(action==='video-preview-preset'){for(const [key,value] of Object.entries({ste
  if(action==='rel-add-for'){const cid=el.dataset.char;const host=document.getElementById('rel-rows');if(!host){toast('请先在大纲页「关系图谱」面板展开后添加');return;}if(dirty)await saveCreation();addRelationRow(project(),{from:cid});dirty=true;const row=host.querySelector('[data-rel-row]:last-child [data-rel-from]');if(row){row.value=cid;row.closest('[data-rel-row]').scrollIntoView({block:'center'});}toast('已预填角色 A，请选择关系与角色 B 后保存');return;}
  if(action==='rel-remove'){el.closest('[data-rel-row]')?.remove();dirty=true;return;}
  if(action==='char-filter'){const g=el.dataset.group;setCharFilter(g);document.querySelectorAll('[data-library="characters"] [data-library-row]').forEach(card=>{const sel=card.querySelector('[data-cast-group]');card.hidden=g!=='all'&&(!sel||sel.value!==g);});document.querySelectorAll('[data-char-filter]').forEach(btn=>btn.classList.toggle('active',btn.dataset.charFilter===g));return;}
- if(action==='idea-filter'){setIdeaFilter(el.dataset.status);render();return;}
- if(action==='idea-quick-add'){const input=document.getElementById('idea-quick-input');const text=(input?.value||'').trim();if(!text)throw new Error('先写点想法再记录');if(dirty)await saveCreation();const p=project();const idea={id:crypto.randomUUID(),content:text,status:'new',tag:'',chapterId:p.activeChapterId,createdAt:new Date().toISOString()};await saveProject({ideas:[...(p.ideas||[]),idea]});if(input)input.value='';toast('闪念已记录');return;}
- if(action==='idea-remove'){const id=el.dataset.id;if(dirty)await saveCreation();const p=project();await saveProject({ideas:(p.ideas||[]).filter(x=>x.id!==id)});toast('闪念已移除');return;}
- if(action==='idea-save'){await saveCreation();toast('闪念已保存');return;}
+ // 闪念笔记弹窗打开时局部刷新弹窗内容（render 会关闭 modal）
+ function refreshIdeasModal(){const host=document.getElementById('ideas-modal-body');if(host)host.innerHTML=ideasPanelHtml(project(),getIdeaFilter().status,getIdeaFilter().text);}
+ if(action==='idea-filter'){setIdeaFilter(el.dataset.status);if(document.getElementById('ideas-modal-body')){refreshIdeasModal();return;}render();return;}
+ if(action==='idea-quick-add'){const input=document.getElementById('idea-quick-input');const text=(input?.value||'').trim();if(!text)throw new Error('先写点想法再记录');if(dirty)await saveCreation();const p=project();const idea={id:crypto.randomUUID(),content:text,status:'new',tag:'',chapterId:p.activeChapterId,createdAt:new Date().toISOString()};await saveProject({ideas:[...(p.ideas||[]),idea]});if(input)input.value='';toast('闪念已记录');if(document.getElementById('ideas-modal-body'))refreshIdeasModal();else render();return;}
+ if(action==='idea-remove'){const id=el.dataset.id;if(dirty)await saveCreation();const p=project();await saveProject({ideas:(p.ideas||[]).filter(x=>x.id!==id)});toast('闪念已移除');if(document.getElementById('ideas-modal-body'))refreshIdeasModal();else render();return;}
+ if(action==='idea-save'){if(document.getElementById('ideas-modal-body')){await saveProject({ideas:readIdeas().map((x,i)=>{const prev=(project().ideas||[])[i]||{};return {...x,createdAt:prev.createdAt||new Date().toISOString()}})});await refresh();toast('闪念已保存');refreshIdeasModal();return;}await saveCreation();toast('闪念已保存');return;}
  if(action==='creation-worldbook'){if(dirty)throw new Error('请先保存当前章节草稿');const instruction=($('#worldbook-gen-instruction')?.value||'').trim()||'依据创作简报、故事设定与角色，补充世界观设定（规则、地点、历史等），不与已有条目重复';await api('/api/jobs','POST',{projectId,kind:'assist',stage:'worldbook',mode:'世界观设定',instruction});await refresh();toast('世界观设定生成中，完成后在「伴写候选」应用');return;}
     if(action==='storyboard-mode'){const active=toggleCanvas(project());canvasMode=active;render();toast(active?'已进入画布模式：拖拽卡片编排分镜':'已切换到列表模式');return;}
     if(action==='sb-generate'){if(dirty){await saveCreation();toast('草稿已先保存');}const si=Number(el.dataset.scene),sj=Number(el.dataset.shot);await api('/api/jobs','POST',{projectId,kind:'video',scene:si,shot:sj});await refresh();toast(`镜头 ${si+1}.${sj+1} 已加入生成队列`);return;}
@@ -404,7 +493,8 @@ if(action==='video-preview-preset'){for(const [key,value] of Object.entries({ste
   else if(['add-profile','copy-profile','delete-profile','share-profile'].includes(action)) {const draft=readSettings();draft.text=updateTextProfiles(draft.text,action,el.dataset.id);state.settings=draft;dirty=true;render();toast(action==='share-profile'?'三个阶段已引用此配置，独立参数保留；请保存':'配置草稿已更新，请保存');}
   else if(action==='video-preset') {const s=readSettings();s.video=await api('/api/video-presets/'+el.dataset.id);if(s.video.provider==='comfy')s.video.baseUrl=state.deploymentConfig.comfyUrl;state.settings=s;dirty=true;render();toast('视频方案已载入，请保存后检查部署');} else if(action==='save-deployment') {await api('/api/deployment/config','PUT',readDeploymentConfig());state.deploymentConfig=readDeploymentConfig();deploymentDirty=false;toast('部署设置已保存');} else if(action==='deploy-model') {if(dirty)throw new Error('请先保存模型配置');await api('/api/deployment/config','PUT',readDeploymentConfig());deploymentDirty=false;await api('/api/deployments','POST',{modelId:el.dataset.id});await refresh();toast('已加入部署队列');} else if(action==='cancel-deployment') {await api('/api/deployments/'+el.dataset.id+'/cancel','POST',{});toast('正在取消部署');} else if(action==='stop-runtime') {await api('/api/runtimes/'+el.dataset.id+'/stop','POST',{});toast('已请求停止服务');}
   else if(action==='probe-native') {if(dirty||deploymentDirty)throw new Error('请先保存配置');toast('检查独立环境与权重…');const result=await api('/api/probe','POST',{kind:'native'});showModal(result.ready?'原生环境与文件就绪':'原生环境可用，权重未齐',JSON.stringify(result,null,2));  } else if(action==='first-frame-clear'){await saveProject({__clearFirstFrame:{scene:Number(el.dataset.scene),shot:Number(el.dataset.shot)}});toast('已清除首帧，恢复文生视频');return;} else if(action==='last-frame-clear'){await saveProject({__clearLastFrame:{scene:Number(el.dataset.scene),shot:Number(el.dataset.shot)}});toast('已清除尾帧');return;}
-  else if(action==='video-focus'){if(dirty)throw new Error('请先保存当前镜头');videoKey=el.dataset.key;render();} else if(action==='video-select-all'){if(dirty)throw new Error('请先保存当前镜头');const p=project(),keys=flatShots(p).map(s=>p.id+':'+p.scriptVersion+':'+s.key),all=keys.every(k=>pickedShots.has(k));keys.forEach(k=>all?pickedShots.delete(k):pickedShots.add(k));render();} else if(action==='video-save'||action==='video-generate'){const scene=Number(el.dataset.scene),shot=Number(el.dataset.shot);await api('/api/projects/'+projectId+'/shots/'+scene+'/'+shot+'/edit','POST',{revision:project().revision,...readShot()});dirty=false;await refresh();if(action==='video-generate'){await api('/api/jobs','POST',{projectId,kind:'video',scene,shot});await refresh();toast('镜头已保存并加入队列');}else toast('镜头已保存');} else if(action==='video-batch'){if(dirty)throw new Error('请先保存当前镜头');const p=project(),shots=flatShots(p).filter(s=>pickedShots.has(p.id+':'+p.scriptVersion+':'+s.key)).map(s=>({scene:s.si,shot:s.i}));await api('/api/video/batch','POST',{projectId,revision:p.revision,shots});await refresh();toast('所选镜头已加入队列');} else if(action==='video-batch-continue'){if(dirty)throw new Error('请先保存当前镜头');const p=project(),shots=flatShots(p).filter(s=>pickedShots.has(p.id+':'+p.scriptVersion+':'+s.key)).map(s=>({scene:s.si,shot:s.i}));if(!shots.length)throw new Error('请先选择镜头');await api('/api/video/batch','POST',{projectId,revision:p.revision,shots,seedMode:'continue'});await refresh();toast('已按连续 Seed 加入队列（相邻镜头画面更稳定）');} else if(action==='video-select-version'){if(dirty)throw new Error('请先保存当前镜头');await api('/api/projects/'+projectId+'/shots/'+el.dataset.scene+'/'+el.dataset.shot+'/select','POST',{revision:project().revision,assetId:el.dataset.id});await refresh();toast('已选定镜头版本');} else if(action==='video-log'){if(dirty)throw new Error('请先保存当前镜头');page='jobs';render();} else if(action==='download-profile') {download('cyancreator-model-profile.json',JSON.stringify(readSettings(),null,2));}
+  else if(action==='video-focus'){if(dirty)throw new Error('请先保存当前镜头');videoKey=el.dataset.key;render();} else if(action==='video-select-all'){if(dirty)throw new Error('请先保存当前镜头');const p=project(),keys=flatShots(p).map(s=>p.id+':'+p.scriptVersion+':'+s.key),all=keys.every(k=>pickedShots.has(k));keys.forEach(k=>all?pickedShots.delete(k):pickedShots.add(k));render();} else if(action==='video-save'||action==='video-generate'){const scene=Number(el.dataset.scene),shot=Number(el.dataset.shot);await api('/api/projects/'+projectId+'/shots/'+scene+'/'+shot+'/edit','POST',{revision:project().revision,...readShot()});dirty=false;await refresh();if(action==='video-generate'){await api('/api/jobs','POST',{projectId,kind:'video',scene,shot});await refresh();toast('镜头已保存并加入队列');}else toast('镜头已保存');} else if(action==='video-batch'){if(dirty)throw new Error('请先保存当前镜头');const p=project(),shots=flatShots(p).filter(s=>pickedShots.has(p.id+':'+p.scriptVersion+':'+s.key)).map(s=>({scene:s.si,shot:s.i}));await api('/api/video/batch','POST',{projectId,revision:p.revision,shots});await refresh();toast('所选镜头已加入队列');} else if(action==='video-batch-continue'){if(dirty)throw new Error('请先保存当前镜头');const p=project(),shots=flatShots(p).filter(s=>pickedShots.has(p.id+':'+p.scriptVersion+':'+s.key)).map(s=>({scene:s.si,shot:s.i}));if(!shots.length)throw new Error('请先选择镜头');await api('/api/video/batch','POST',{projectId,revision:p.revision,shots,seedMode:'continue'});await refresh();toast('已按连续 Seed 加入队列（相邻镜头画面更稳定）');} else if(action==='video-select-version'){if(dirty)throw new Error('请先保存当前镜头');await api('/api/projects/'+projectId+'/shots/'+el.dataset.scene+'/'+el.dataset.shot+'/select','POST',{revision:project().revision,assetId:el.dataset.id});await refresh();toast('已选定镜头版本');} else if(action==='video-log'){if(dirty)throw new Error('请先保存当前镜头');page='jobs';render();}
+ else if(action==='shot-still'){if(dirty)throw new Error('请先保存当前镜头');const scene=Number(el.dataset.scene),shot=Number(el.dataset.shot);await api('/api/jobs','POST',{projectId,kind:'shot-still',scene,shot,instruction:document.querySelector('#shot-instruction')?.value||undefined});await refresh();toast('静帧任务已排队，完成后可在首帧下拉中选择');} else if(action==='download-profile') {download('cyancreator-model-profile.json',JSON.stringify(readSettings(),null,2));}
   else if(action==='probe'||action==='probe-comfy') {if(dirty) throw new Error('请先保存配置再测试');toast('正在测试模型服务…');const result=await api('/api/probe','POST',{kind:action==='probe'?'text':'comfy',start:action==='probe-comfy',profileId:el.dataset.id});showModal(result.ready===false?'服务已连接，但部署不完整':'服务连接成功',JSON.stringify(result,null,2));}
   else if(action==='refresh') {if(dirty) throw new Error('请先保存修改');await refresh();}
   else if(action==='cancel') {await api(`/api/jobs/${el.dataset.id}/cancel`,'POST',{});await refresh();}
@@ -419,7 +509,7 @@ if(action==='video-preview-preset'){for(const [key,value] of Object.entries({ste
   else if(['move-up','move-down','remove-clip'].includes(action)) {readTimeline();const arr=project().timeline,i=Number(el.dataset.index);if(action==='remove-clip')arr.splice(i,1);else {const next=i+(action==='move-up'?-1:1);if(next>=0&&next<arr.length)[arr[i],arr[next]]=[arr[next],arr[i]];}await saveProject({audioTracks:readTracks(project()),timeline:arr});}
   else if(action==='preview') {readTimeline();previewId=el.dataset.id;render();}
 }
-async function saveCreation(){const value=captureDocument(),empty=page==='outline'?!value.logline&&!value.beats.some(b=>b.title||b.summary):!value.scenes.some(s=>s.title||s.action||s.dialogue||s.shots.some(x=>x.prompt));const libChars=document.querySelector('[data-library="characters"] [data-library-row]');const ideaRows=document.getElementById('idea-rows');const ideas=ideaRows?mergeIdeas(project().ideas,readIdeas()):project().ideas;await api('/api/projects/'+projectId+'/draft','POST',{revision:project().revision,stage:page,value:empty?null:value,brief:$('#brief')?.value??project().brief,bible:$('#bible')?.value??project().bible,characters:libChars?readLibrary('characters'):project().characters,worldbook:libChars?readLibrary('worldbook'):project().worldbook,ideas,...(page==='outline'&&document.getElementById('rel-rows')?{relations:readRelations()}:{})});dirty=false;await refresh();toast('章节与共享设定已保存');}
+async function saveCreation(){const value=captureDocument(),empty=page==='outline'?!value.logline&&!value.beats.some(b=>b.title||b.summary):!value.scenes.some(s=>s.title||s.action||s.dialogue||s.shots.some(x=>x.prompt));const libChars=document.querySelector('[data-library="characters"] [data-library-row]');const libAny=document.querySelector('[data-library] [data-library-row]');const ideaRows=document.getElementById('idea-rows');const ideas=ideaRows?mergeIdeas(project().ideas,readIdeas()):project().ideas;await api('/api/projects/'+projectId+'/draft','POST',{revision:project().revision,stage:page,value:empty?null:value,brief:$('#brief')?.value??project().brief,bible:$('#bible')?.value??project().bible,characters:libChars?readLibrary('characters'):project().characters,worldbook:libChars?readLibrary('worldbook'):project().worldbook,sets:libAny?readLibrary('sets'):(project().sets||[]),props:libAny?readLibrary('props'):(project().props||[]),ideas,...(page==='outline'&&document.getElementById('rel-rows')?{relations:readRelations()}:{})});dirty=false;await refresh();toast('章节与共享设定已保存');}
 function mergeIdeas(existing,edited){const byId=new Map((existing||[]).map(x=>[x.id,x]));return edited.map(x=>{const old=byId.get(x.id)||{};return {id:x.id,content:x.content,status:x.status,tag:x.tag,chapterId:x.chapterId,createdAt:old.createdAt||new Date().toISOString()};}).concat((existing||[]).filter(x=>!edited.some(e=>e.id===x.id)));}
 function fmtSRT(t){const h=Math.floor(t/3600),m=Math.floor(t%3600/60),sec=Math.floor(t%60),ms=Math.round(t%1*1000);return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')},${String(ms).padStart(3,'0')}`;}
 function srtText(subs){return subs.map(s=>`${s.start} ${s.end} ${s.text.replace(/\n/g,' ')}`).join('\n');}
@@ -527,9 +617,10 @@ document.addEventListener('drop',e=>{
   const zone=e.target.closest&&e.target.closest('[data-sb-scene]');
   if(zone&&Number(zone.dataset.sbScene)!==Number(sbDrag.split('.')[0])){moveStoryboardShot(sbDrag,Number(zone.dataset.sbScene)+':end',project());dirty=true;render();toast('镜头已移动到场景 '+(Number(zone.dataset.sbScene)+1)+' 末尾');}
 });
-document.addEventListener('input',e=>{if(e.target.id==='secret-search'){secretSearch=e.target.value;renderSecretList();}if(e.target.id==='idea-search'){setIdeaFilter(undefined,e.target.value);const q=e.target.value.trim().toLowerCase();document.querySelectorAll('#idea-rows [data-idea-row]').forEach(r=>{const hay=((r.querySelector('[data-idea-content]')?.value||'')+' '+(r.querySelector('[data-idea-tag]')?.value||'')).toLowerCase();r.hidden=!!q&&!hay.includes(q);});return;}if(e.target.dataset.voiceText!==undefined)voiceDrafts.set(e.target.dataset.voiceText,e.target.value);if(e.target.matches('[data-deploy-config]'))deploymentDirty=true;if(e.target.closest('#app')&&e.target.id!=='project-select'&&!e.target.matches('[data-transient],[data-editor-nav]')&&e.target.type!=='file'&&!e.target.matches('[data-shot-pick]')&&!e.target.matches('[data-deploy-config]')){dirty=true;const status=$('.form-status');if(status)status.textContent='有未保存修改';if(page==='models'){const ha=$('.heading-actions');if(ha&&!ha.querySelector('[data-action="save-settings"]'))ha.insertAdjacentHTML('afterbegin',button('保存设置','save-settings','primary'));}}});
+document.addEventListener('input',e=>{if(e.target.id==='secret-search'){secretSearch=e.target.value;renderSecretList();}if(e.target.id==='idea-search'){setIdeaFilter(undefined,e.target.value);const q=e.target.value.trim().toLowerCase();document.querySelectorAll('#idea-rows [data-idea-row]').forEach(r=>{const hay=((r.querySelector('[data-idea-content]')?.value||'')+' '+(r.querySelector('[data-idea-tag]')?.value||'')).toLowerCase();r.hidden=!!q&&!hay.includes(q);});return;}if(e.target.dataset.voiceText!==undefined)voiceDrafts.set(e.target.dataset.voiceText,e.target.value);if(e.target.matches('[data-deploy-config]'))deploymentDirty=true;if(e.target.closest('#app')&&e.target.id!=='project-select'&&!e.target.matches('[data-transient],[data-editor-nav]')&&e.target.type!=='file'&&!e.target.matches('[data-shot-pick]')&&!e.target.matches('[data-deploy-config]')&&!e.target.closest('.canvas-shot-panel')){dirty=true;const status=$('.form-status');if(status)status.textContent='有未保存修改';if(page==='models'){const ha=$('.heading-actions');if(ha&&!ha.querySelector('[data-action="save-settings"]'))ha.insertAdjacentHTML('afterbegin',button('保存设置','save-settings','primary'));}}});
 document.addEventListener('change',async e=>{
   try {
+    if(e.target.id==='compact-scale-toggle'){if(window.__setCompactScale)window.__setCompactScale(e.target.checked);toast(e.target.checked?'窄窗口自动缩放已开启':'窄窗口自动缩放已关闭');return;}
     if(e.target.dataset.characterImport){if(dirty)throw new Error('请先保存角色');const file=e.target.files[0];if(!file)return;if(file.size>20*1024*1024)throw new Error('参考图不能超过 20MB');const h={'Content-Type':file.type||'application/octet-stream'};if(state?.token)h[SESSION_HEADER_NAME]=state?.token;const r=await fetch('/api/assets?'+new URLSearchParams({projectId,characterId:e.target.dataset.characterImport,name:file.name,kind:'image'}),{method:'POST',headers:h,body:file});const result=await r.json();if(!r.ok)throw new Error(result.error);e.target.value='';await refresh();toast('参考图已导入，请在角色卡片中选为参考');return;}
     if(e.target.id==='chapter-select'){if(dirty){e.target.value=project().activeChapterId;throw new Error('请先保存当前章节');}await api('/api/projects/'+projectId+'/structure','POST',{revision:project().revision,action:'switch',id:e.target.value});await refresh();return;}
     if(e.target.id==='creation-import'){const file=e.target.files[0];if(!file)return;if(dirty)throw new Error('请先保存当前草稿再导入');if(file.size>1024*1024)throw new Error('文件不能超过 1MB');const value=await api('/api/import-document','POST',{stage:page,text:await file.text(),format:file.name.toLowerCase().endsWith('.json')?'json':'text'});replaceDraft(value,project());dirty=true;toast('已导入预览，请检查后保存');return;}
@@ -544,6 +635,7 @@ document.addEventListener('change',async e=>{
     if(e.target.matches('[data-shot-pick]')){e.target.checked?pickedShots.add(e.target.dataset.shotPick):pickedShots.delete(e.target.dataset.shotPick);} if(e.target.matches('[data-route], [data-override]')) {state.settings=readSettings();dirty=true;render();}
     if(e.target.id==='asset-project-filter'){assetProject=e.target.value;render();return;}
     if(e.target.id==='project-select'){if(dirty){e.target.value=projectId;throw new Error('请先保存当前修改');}projectId=e.target.value;localStorage.setItem('projectId',projectId);editor=false;render();}
+    if(e.target.id==='canvas-wf-select'){setActiveGroup(e.target.value);render();return;}
     if(e.target.id==='workflow-file'){const file=e.target.files[0];if(!file)return;const graph=JSON.parse(await file.text());if(graph.nodes)throw new Error('这是界面工作流，请从 ComfyUI 导出 API 格式');$('#workflow').value=JSON.stringify(graph,null,2);dirty=true;toast('已导入，请配置参数绑定后保存');}
     if(e.target.dataset.sbFrame){if(dirty)throw new Error('画布上有未保存修改，请先保存稿件再设置首尾帧');const si=Number(e.target.dataset.scene),sj=Number(e.target.dataset.shot),kind=e.target.dataset.sbFrame,v=e.target.value;await saveProject(v?{[kind==='first'?'__firstFrame':'__lastFrame']:{scene:si,shot:sj,assetId:v}}:{[kind==='first'?'__clearFirstFrame':'__clearLastFrame']:{scene:si,shot:sj}});toast(kind==='first'?(v?'首帧已保存':'已清除首帧'):(v?'尾帧已保存':'已清除尾帧'));return;}
     if(e.target.id==='shot-first-frame'){if(dirty)throw new Error('请先保存当前修改');const key=videoKey,si=Number(key.split('-')[0]),i=Number(key.split('-')[1]||0);await saveProject(e.target.value?{__firstFrame:{scene:si,shot:i,assetId:e.target.value}}:{__clearFirstFrame:{scene:si,shot:i}});toast(e.target.value?'首帧已保存，生成时将作为视频第一帧':'已清除首帧');return;}
@@ -551,7 +643,12 @@ document.addEventListener('change',async e=>{
     if(e.target.id==='export-preset'){if(dirty)throw new Error('请先保存当前修改');await saveProject({exportPreset:e.target.value});toast('导出档位已保存');return;}
     if(e.target.id==='video-provider'){ $('#video-url').value=e.target.value==='comfy'?'http://127.0.0.1:8188':'https://api.minimax.io/v1';$('#video-model').value=e.target.value==='comfy'?'自定义视频工作流':'MiniMax-Hailuo-2.3';$('#video-key').value=e.target.value==='comfy'?'':'MINIMAX_API_KEY';dirty=true;}
     if(e.target.id==='upload'||e.target.id==='audio-import'){if(dirty)throw new Error('请先保存当前修改');const file=e.target.files[0];if(!file)return;if(file.size>512*1024*1024)throw new Error('素材不能超过 512MB');toast('正在导入并分析视频…');const h={'Content-Type':file.type||'application/octet-stream'};if(state?.token)h[SESSION_HEADER_NAME]=state?.token;const r=await fetch(`/api/assets?${new URLSearchParams({projectId,name:file.name,kind:e.target.id==='audio-import'?'audio':'video'})}`,{method:'POST',headers:h,body:file});const result=await r.json();if(!r.ok)throw new Error(result.error);await refresh();toast('素材已导入');}
-  }catch(err){toast(err.message);}
+  }catch(err){
+    // N3 报错可操作化：模型/密钥类错误附带「去设置中心」直达
+    const msg=String(err&&err.message||err);
+    const setupNeeded=/(模型|密钥|配置|API ?Key|provider|部署)/i.test(msg)&&!/已保存|已切换|已应用/.test(msg);
+    toast(msg, setupNeeded?{setup:true}:undefined);
+  }
 });
 $('#close-modal').onclick=()=>$('#modal').close();
 window.addEventListener('beforeunload',e=>{if(dirty||deploymentDirty){e.preventDefault();e.returnValue='';}});
@@ -570,7 +667,9 @@ async function openWorkspace(){const started=performance.now();try{await refresh
 $('#welcome-retry').onclick=()=>location.reload();
 // AI 伴写悬浮入口：聚焦可伴写字段（大纲/剧本/分镜画布的文本框）时出现在旁侧
 const assistTargets='textarea[data-doc-path]';
+let assistBlurTimer=0;
 document.addEventListener('focusin',e=>{
+  clearTimeout(assistBlurTimer);
   const t=e.target.closest&&e.target.closest(assistTargets);
   const fl=$('#assist-float');
   if(!t||!['outline','script'].includes(page)){
@@ -587,10 +686,15 @@ document.addEventListener('focusin',e=>{
 // 悬浮按钮与弹层跟随字段滚动：页面滚动、容器滚动、窗口尺寸变化时重新定位
 function positionAssistFloat(){
   const fl=$('#assist-float');if(!fl)return;
-  const t=assistField;if(!t||!t.isConnected){fl.hidden=true;return;}
   const pop=$('#assist-pop');
+  // F1 自愈：锚点失联时，若当前焦点本身是可伴写字段则重新接管（focusin 事件可能丢失）
+  const ae= document.activeElement;
+  let t=assistField;
+  {const aeTarget=ae&&ae.closest?ae.closest(assistTargets):null;
+   if((!t||!t.isConnected)&&aeTarget&&aeTarget.isConnected){t=aeTarget;assistField=t;window.__af=t;}}
+  if(!t||!t.isConnected){fl.hidden=true;return;}
   // 仅当字段仍在焦点内、或伴写弹层仍打开时显示；失焦/关闭后滚动不应复现按钮
-  const focusInField=t===document.activeElement||t.contains(document.activeElement);
+  const focusInField=t===ae||t.contains(ae);
   const popOpen=assistPopOpen;
   if(!focusInField&&!popOpen){fl.hidden=true;return;}
   const r=t.getBoundingClientRect();
@@ -617,7 +721,7 @@ function scheduleAssistSync(){positionAssistFloat();}
 window.addEventListener('resize',scheduleAssistSync,{passive:true});
 document.addEventListener('scroll',e=>{if(e.target&&e.target.closest&&e.target.closest('#assist-pop'))return;scheduleAssistSync();},{capture:true,passive:true});
 
-document.addEventListener('focusout',()=>{setTimeout(()=>{if(assistPopOpen)return;const fl=$('#assist-float');if(!fl||fl.contains(document.activeElement)||$('#assist-pop').contains(document.activeElement))return;if(assistField&&document.activeElement===assistField)return;fl.hidden=true;},200);});
+document.addEventListener('focusout',()=>{clearTimeout(assistBlurTimer);assistBlurTimer=setTimeout(()=>{if(assistPopOpen)return;const fl=$('#assist-float');if(!fl||fl.contains(document.activeElement)||$('#assist-pop').contains(document.activeElement))return;if(assistField&&document.activeElement===assistField)return;fl.hidden=true;},200);});
 document.body.insertAdjacentHTML('beforeend',`<div id="assist-float" hidden><button class="primary small" id="assist-float-btn" type="button">✧ AI 伴写</button></div><div id="assist-pop" hidden><label>模型<div class="assist-model-checks" id="assist-pop-models"></div></label><label>写作方式<select id="assist-pop-mode" data-transient><option>续写</option><option>润色</option><option>扩写</option><option>重新构思</option><option>拆解分镜</option></select></label><label>你的要求<textarea id="assist-pop-text" data-transient></textarea></label><div class="actions">${'<button class="primary small" data-action="assist-float-generate">生成候选</button>'}${'<button class="small ghost" data-action="assist-float-close">收起</button>'}</div><p class="hint">候选生成后在「伴写候选」或任务记录中预览应用。</p></div>`);
 let assistField=null,assistPopOpen=false,assistPopSuspended=false;
 function hideAssistPop(){assistPopOpen=false;assistPopSuspended=false;const pop=$('#assist-pop');if(pop)pop.hidden=true;}
@@ -711,5 +815,19 @@ document.addEventListener('keydown',e=>{
   if(e.key==='Enter'&&e.target&&e.target.id==='assist-float-btn'){e.preventDefault();openAssistPop();}
 });
 try{coachBoot(state,coachCtx);}catch(e){console.warn('coach boot failed',e);}
+// E2 窗口自适应：窄窗口（769–1079px）按比例缩根，默认关闭，设置中心「界面显示」可开启；偏好存 localStorage
+{
+  const KEY='ui:compact-scale';
+  let pref=localStorage.getItem(KEY);
+  if(pref===null){pref='0';localStorage.setItem(KEY,pref);}
+  const applyScale=()=>{
+    const w=document.documentElement.clientWidth;
+    document.documentElement.style.zoom=(pref==='1'&&w>768&&w<1080)?String(Math.max(0.75,w/1080)):'';
+  };
+  applyScale();
+  window.addEventListener('resize',applyScale,{passive:true});
+  window.__setCompactScale=v=>{pref=v?'1':'0';localStorage.setItem(KEY,pref);applyScale();};
+  window.__compactScaleEnabled=()=>pref==='1';
+}
 await openWorkspace();
-setInterval(async()=>{if(!state)return;try{const next=await api('/api/state');const coachSig=js=>js.map(j=>j.kind==='coach'?j.id+j.status+(j.progress?.message||''):'').join();if(coachSig(next.jobs)!==coachSig(state.jobs)&&!$('#modal').open){state=next;coachRender(state);if(!dirty)render();return;}if(page==='models'){const added=next.settings.text.profiles.some(p=>!state.settings.text.profiles.some(x=>x.id===p.id));if(added&&!dirty&&!deploymentDirty&&!document.activeElement?.matches('input,textarea,select')){state=next;render();return;}for(const key of ['deployments','runtimes'])state[key]=next[key];if($('#deployment-progress'))$('#deployment-progress').innerHTML=deploymentProgress(next);if($('#runtime-status'))$('#runtime-status').innerHTML=runtimeStatus(next);return;}if(page==='video'&&$('#shot-task-progress'))$('#shot-task-progress').innerHTML=shotProgress(project(),next,videoKey);if(!dirty&&!$('#modal').open&&next.jobs.map(j=>j.status+(page==='jobs'?j.progress?.message||'':'')).join()!==state.jobs.map(j=>j.status+(page==='jobs'?j.progress?.message||'':'')).join()){state=next;render();}}catch{/* Keep drafts during temporary disconnects. */}},2500);
+setInterval(async()=>{if(!state)return;try{const next=await api('/api/state');const coachSig=js=>js.map(j=>j.kind==='coach'?j.id+j.status+(j.progress?.message||''):'').join();if(coachSig(next.jobs)!==coachSig(state.jobs)&&!$('#modal').open){state=next;coachRender(state);if(!dirty)render();return;}if(page==='models'){const added=next.settings.text.profiles.some(p=>!state.settings.text.profiles.some(x=>x.id===p.id));if(added&&!dirty&&!deploymentDirty&&!document.activeElement?.matches('input,textarea,select')){state=next;render();return;}for(const key of ['deployments','runtimes'])state[key]=next[key];if($('#deployment-progress'))$('#deployment-progress').innerHTML=deploymentProgress(next);if($('#runtime-status'))$('#runtime-status').innerHTML=runtimeStatus(next);return;}if(page==='video'&&$('#shot-task-progress'))$('#shot-task-progress').innerHTML=shotProgress(project(),next,videoKey);if(!dirty&&!$('#modal').open&&next.jobs.map(j=>j.status+(page==='jobs'?(j.progress?.message||'')+(typeof j.progress?.percent==='number'?'|'+j.progress.percent:''):'')).join()!==state.jobs.map(j=>j.status+(page==='jobs'?(j.progress?.message||'')+(typeof j.progress?.percent==='number'?'|'+j.progress.percent:''):'')).join()){state=next;render();}}catch{/* Keep drafts during temporary disconnects. */}},2500);
